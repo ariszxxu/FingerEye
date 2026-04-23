@@ -1,0 +1,53 @@
+defaults:
+  - base_settings
+  - _self_
+name: coin_flipping
+leap_kP: 120
+leap_kD: 15 
+
+leap_init_joint_values_radian: [3.1492626667022705, 3.922388792037964, 2.957515001296997, 3.1692042350769043, 
+                                3.1415927410125732, 3.1415927410125732, 3.1415927410125732, 3.1415927410125732, 
+                                3.1415927410125732, 3.1415927410125732, 3.1415927410125732, 3.1415927410125732, 
+                                4.663301467895508, 3.15079665184021, 2.165980815887451, 3.184544086456299]
+
+# xarm_init_joint_values_degree: [-12.155128, -2.173401, -12.661909, 28.780701, -2.586331, 30.721882, -14.211473]
+xarm_init_joint_values_degree:  [0.008938, 3.018456, 0.007219, 25.136461, -0.05191, 20.339543, -0.001547]
+tele_leap_disabled_idx: [[4, 12]]
+
+enabled_stereo_camera_names: ["I", "T"]
+camera_names: ["I-root", "I-tip", "T-root", "T-tip"]
+
+control_indices: [0, 1, 2, 3, 12, 13, 14, 15]
+
+keyboard_keep_obs_idx: [[7, 11], [19, 23]]   
+kin_keep_obs_idx: [[7, 11], [19, 23]]
+# action dim reduction 
+keyboard_keep_action_idx: [[3, 7], [15, 19]]   
+kin_keep_action_idx: [[7, 11], [19, 23]]
+
+
+use_keyboard_arm_tele: True
+use_kin_arm_tele: False
+use_mixed_tele: False
+target_leap_names:
+  - leap_0
+  - leap_1
+  - leap_2
+  - leap_3
+  - leap_12
+  - leap_13
+  - leap_14
+  - leap_15
+
+real_joint_names : ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6', 'joint7', # xarm
+                      'leap_0','leap_1','leap_2','leap_3', # index
+                      'leap_4','leap_5','leap_6','leap_7', # middle
+                      'leap_8','leap_9','leap_10','leap_11', # ring
+                      'leap_12','leap_13','leap_14','leap_15'] # thumb
+control_joint_names: ['leap_0','leap_1','leap_2','leap_3', # index
+                      'leap_12','leap_13','leap_14','leap_15'] # thumb
+
+leap_joint_names: [  'leap_0','leap_1','leap_2','leap_3', # index
+                      'leap_4','leap_5','leap_6','leap_7', # middle
+                      'leap_8','leap_9','leap_10','leap_11', # ring
+                      'leap_12','leap_13','leap_14','leap_15'] # thumb

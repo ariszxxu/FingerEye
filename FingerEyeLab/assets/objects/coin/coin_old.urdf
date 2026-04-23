@@ -1,0 +1,58 @@
+<?xml version="1.0"?>
+<robot name="coin">
+  <link name="coin">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="coin.obj" scale="1000 1000 1000"/>
+      </geometry>
+    </visual>
+
+  <collision>
+    <origin xyz="0 0 2.5" rpy="0 0 0"/>
+    <geometry>
+      <cylinder length="1" radius="12.0"/>
+    </geometry>
+  </collision>
+
+  <!-- z = +1.5 -->
+  <collision>
+    <origin xyz="0 0 1.5" rpy="0 0 0"/>
+    <geometry>
+      <cylinder length="1" radius="13.5"/>
+    </geometry>
+  </collision>
+
+  <!-- z = +0.5 (center) -->
+  <collision>
+    <origin xyz="0 0 0.5" rpy="0 0 0"/>
+    <geometry>
+      <cylinder length="1" radius="15.0"/>
+    </geometry>
+  </collision>
+
+  <!-- z = -0.5 (center) -->
+  <collision>
+    <origin xyz="0 0 -0.5" rpy="0 0 0"/>
+    <geometry>
+      <cylinder length="1" radius="15.0"/>
+    </geometry>
+  </collision>
+
+  <!-- z = -1.5 -->
+  <collision>
+    <origin xyz="0 0 -1.5" rpy="0 0 0"/>
+    <geometry>
+      <cylinder length="1" radius="13.5"/>
+    </geometry>
+  </collision>
+
+  <!-- z = -2.5 -->
+  <collision>
+    <origin xyz="0 0 -2.5" rpy="0 0 0"/>
+    <geometry>
+      <cylinder length="1" radius="12.0"/>
+    </geometry>
+  </collision>
+  </link>
+</robot>

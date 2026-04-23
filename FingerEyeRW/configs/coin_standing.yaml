@@ -1,0 +1,45 @@
+defaults:
+  - base_settings
+  - _self_
+name: coin_standing
+leap_kP: 120
+leap_kD: 15 
+
+leap_init_joint_values_radian: [
+  0.0076700127,  0.7807961384, -0.1840776523,  0.0276115815,
+  0.0000000874,  0.0000000874,  0.0000000874,  0.0000000874,
+  0.0000000874,  0.0000000874,  0.0000000874,  0.0000000874,
+  1.5217088143,  0.0092039983, -0.9756118377,  0.0429514329
+]
+
+
+xarm_init_joint_values_degree:  [0.008938, 3.018456, 0.007219, 25.136461, -0.05191, 20.339543, -0.001547]
+tele_leap_disabled_idx: [[4, 12]]
+
+enabled_stereo_camera_names: ["I", "T"]
+camera_names: ["I-root", "I-tip", "T-root", "T-tip"]
+use_gelsight: False
+# Recording: 
+# proprio observation dim reduction 
+keyboard_keep_obs_idx: [[7, 11], [19, 23]]   
+kin_keep_obs_idx: [[7, 11], [19, 23]]
+# action dim reduction 
+keyboard_keep_action_idx: [[3, 7], [15, 19]]   
+kin_keep_action_idx: [[7, 11], [19, 23]]
+
+xarm_min_height:   [0.017819, 3.851537, 0.010428, 25.1352, -0.065489, 19.483143, 0.002636]
+xarm_max_height: [0.0, 0.399982, 0.0, 25.200002, -0.0, 23.000016, -0.0] 
+
+use_keyboard_arm_tele: True
+use_kin_arm_tele: False
+use_mixed_tele: False
+
+target_leap_names:
+  - leap_0
+  - leap_1
+  - leap_2
+  - leap_3
+  - leap_12
+  - leap_13
+  - leap_14
+  - leap_15

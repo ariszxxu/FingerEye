@@ -1,0 +1,110 @@
+defaults:
+  - _self_
+  - setting: coin_fingereye
+
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${setting.name}_${now:%H-%M-%S}
+
+name: fingereye
+task_name: ${setting.name}
+exp_name: "default"
+horizon: 16
+n_obs_steps: 1
+n_action_steps: 8
+device: "cuda"
+
+eval_only: False 
+eval_ckpt_path: null 
+
+training:
+  device: ${device}
+  seed: 42
+  resume: False
+  # ema
+  use_ema: True
+  # optimization
+  lr_scheduler: cosine
+  lr_warmup_steps: 500
+  num_epochs: 2000
+  # checkpoint
+  checkpoint_every: 500
+  # misc 
+  tqdm_interval_sec: 1.0
+
+
+policy:
+  _target_: fingereye.policies.fingereye.fingereye.FingerEyePolicy
+
+  # temporal 
+  horizon: ${horizon}
+  n_action_steps: ${n_action_steps}
+  n_obs_steps: ${n_obs_steps}
+
+  # modalities
+  nv: ${setting.nv}
+  use_rs_indices: ${setting.use_rs_indices}
+  use_camera_indices: ${setting.use_camera_indices}
+  n_tags : ${setting.n_tags}
+  n_tag_steps : ${setting.n_tag_steps}
+  # sim or not 
+  use_sim_pose_decoder: ${setting.use_sim_pose_decoder}
+
+  # other dimensions 
+  ds: ${setting.ds}
+  da: ${setting.da}
+  
+  # transformer
+  n_encoder_layers: 4
+  n_decoder_layers: 4
+  dim_model: 512
+  n_heads: 16
+  dim_feedforward: 2048
+  feedforward_activation: "gelu"
+  dropout: 0.0
+  pre_norm: False
+
+
+ema:
+  _target_: fingereye.models.common.ema_model.EMAModel
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999
+
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 1.0e-4
+  betas: [0.95, 0.999]
+  eps: 1.0e-8
+  weight_decay: 1.0e-6
+
+
+dataloader:
+  batch_size: 256
+  num_workers: 4 
+  shuffle: True
+  pin_memory: True
+  persistent_workers: False
+  drop_last: True
+
+
+logging:
+  project: fingereye
+  resume: True
+  mode: online
+  name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+  tags: ["${name}", "${task_name}", "${exp_name}"]
+  id: null
+  group: null
+
+checkpoint:
+  topk:
+    monitor_key: val_loss
+    mode: min
+    k: 5
+    format_str: 'epoch={epoch:04d}-val_loss={val_loss:.3f}.ckpt'
+  save_last_ckpt: True
+  save_last_snapshot: False

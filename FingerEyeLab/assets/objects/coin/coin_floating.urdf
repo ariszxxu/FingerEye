@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<robot name="coin">
+  <link name="coin">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="coin.obj" scale="1000 1000 1000" />
+      </geometry>
+    </visual>
+
+    <!-- <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="coin.obj" scale="1000 1000 1000" />
+      </geometry>
+    </collision> -->
+
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <cylinder length="2" radius="15" />
+      </geometry>
+    </collision>               
+
+    <!-- <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <cylinder length="2" radius="15" />
+      </geometry>
+    </collision> -->
+  </link>
+    
+</robot>

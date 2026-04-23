@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<robot name="square_hole">
+  <link name="square_hole">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="square_hole_adjust.STL"/>
+      </geometry>
+    </visual>
+
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="square_hole_adjust.STL"/>
+      </geometry>
+    </collision>
+  </link>
+</robot>

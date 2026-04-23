@@ -1,0 +1,64 @@
+mode: "record"  
+# "tele_test": disable camera obs, disable data recording 
+# "record": enable camera obs, enable data recording 
+# "policy": enable camera obs, disable data recording, run policy 
+
+urdf_scale: 1.0
+
+isaac_physics_frequency: 60    # Physics simulation frequency (Hz)
+isaac_render_frequency: 120    # Rendering frequency (Hz)
+viser_update_frequency: 10     # Viser update frequency (Hz)
+
+sim_substeps: 2                # Number of substeps per physics step
+
+num_envs: 2
+env_spacing: 1
+
+sync_frame_time: false         # Disable frame sync for better performance
+enable_tensors: false          # Disable tensors to avoid CUDA issues
+
+xarm_api: "192.168.1.243"
+server_xarm_api: "192.168.1.222"
+robot_urdf_path: "../assets/xarm7_leap_right/xarm7/xarm7_leap_right.urdf"
+zmq_addr: "tcp://192.168.1.123:5557"
+record_frequency: 10
+
+use_keyboard_arm_tele: False 
+use_kin_arm_tele: True
+use_mixed_tele: False
+keyboard_tele_speed_scale: [30, 30, 30, 30, 5, 5]   # [+x, -x, +y, -y, +z, -z]
+
+# camera settings
+W_resize: 640
+H_resize: 480
+W: 640
+H: 480
+
+camera_to_port: {
+  "I" : "3-8",
+  "T" : "3-4:1.0",
+  "M" : "3-7",
+  "R" : "3-3",
+}
+camera_left_right_order: {
+  "I" : ["I-root", "I-tip"],
+  "T" : ["T-tip", "T-root"],
+  "M" : ["M-tip", "M-root"],
+  "R" : ["R-tip", "R-root"],
+}
+camera_names: ["I-root", "I-tip", "T-root", "T-tip", "M-root", "M-tip", "R-root", "R-tip"]
+rs_camera_names: ["d435"]
+aux_rs_camera_names: []
+
+default_camera_opts : {
+  "input_format": "mjpeg",
+  "video_size": "1280x480", 
+  "framerate": "25",        
+}
+rs_fps: 30  # 15 or 30
+
+# policy mode 
+eval_ckpt_path: null
+eval_ckpt_config_path: null
+
+save_video_path: logs/policy_videos

@@ -1,0 +1,26 @@
+name: &task_name syringe_wrist
+
+zarr_path: &zarr_path your_zarr_path.zarr
+
+ds: 12
+da: 13
+nv: 1
+
+use_rs_indices: [0]
+use_camera_indices: []
+n_tags: 0
+n_tag_steps: 0
+use_sim_pose_decoder: False
+
+dataset:
+  _target_: fingereye.datasets.fingereye_dataset.FingerEyeDataset
+  zarr_path: *zarr_path
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps}-1'}
+  pad_after: ${eval:'${horizon}-1'}
+  seed: 42
+  val_ratio: 0.00
+  max_train_episodes: 100
+  replay_buffer_keys: ["obs/all_qpos", 
+                      "obs/rs_rgb_images_radio",  
+                      "actions/original_actions"] 

@@ -1,0 +1,31 @@
+defaults:
+  - base_settings
+name: chip_picking
+leap_kP: 200
+leap_kD: 15 
+leap_init_joint_values_radian: [
+  0.0076700127,  0.7807961384, -0.1840776523,  0.0276115815,
+  0.0000000874,  0.0000000874,  0.0000000874,  0.0000000874,
+  0.0000000874,  0.0000000874,  0.0000000874,  0.0000000874,
+  1.5217088143,  0.0092039983, -0.9756118377,  0.0429514329
+]
+
+xarm_init_joint_values_degree: [-12.028103, -5.987294, -12.899629, 28.923712, -2.623345, 33.011422, -13.783187]
+
+tele_leap_disabled_idx: [[4, 12]]
+
+enabled_stereo_camera_names: ["I", "T"]
+camera_names: ["I-root", "I-tip", "T-root", "T-tip"]
+
+# Recording: 
+# proprio observation dim reduction 
+keyboard_keep_obs_idx: [[7, 11], [19, 23]]   
+kin_keep_obs_idx: [[7, 11], [19, 23]]
+# action dim reduction 
+use_gelsight: False
+keyboard_keep_action_idx: [2, [3, 7], [15, 19]]   
+kin_keep_action_idx: [[0, 7], [7, 11], [19, 23]]
+
+use_keyboard_arm_tele: True 
+use_kin_arm_tele: False
+use_mixed_tele: False

@@ -1,0 +1,37 @@
+defaults:
+  - base_settings
+name: syringe_manipulation
+leap_kP: 1200
+leap_kD: 600
+kp_side: 1.1
+kd_side: 1
+kp_T_tip: 1.8
+kd_T_tip: 1.1
+leap_init_joint_values_radian: [
+  0.0076700127,  0.7807961384, -0.1840776523,  0.0276115815,
+  0.0076700127,  0.7807961384, -0.1840776523,  0.0276115815,
+  0.0000000874,  0.0000000874,  0.0000000874,  0.0000000874,
+  1.5217088143,  0.0092039983, -0.9756118377,  0.0429514329
+]
+use_keyboard_arm_tele: True 
+use_kin_arm_tele: False
+use_mixed_tele: False
+
+xarm_init_joint_values_degree:  [0.009798, 2.188126, 0.003839, 25.141159, -0.032258, 21.152742, 0.000745]
+
+tele_leap_disabled_idx: [[8, 12]]
+
+enabled_stereo_camera_names: ["I", "T", "M"]
+
+camera_names: ["I-root", "I-tip", "T-root", "T-tip","M-root", "M-tip"]
+use_gelsight: False
+# action dim reduction 
+keyboard_keep_obs_idx: [[7, 15], [19, 23]]
+keyboard_keep_action_idx: [[0, 9], [13, 17]]
+
+xarm_min_height:  [0.009798, 2.188126, 0.003839, 25.141159, -0.032258, 21.152742, 0.000745]
+xarm_max_height:  [-0.019652, -7.593467, -0.045149, 26.250921, 0.152063, 32.045759, 0.018392]
+
+xarm_target_joint_values_degree_list:  [ 
+                                        [0.018449, 9.194082, 0.212854, 59.955392, 0.668928, 48.966749, -0.018163],
+                                        ]

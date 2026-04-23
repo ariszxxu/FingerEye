@@ -1,0 +1,42 @@
+<?xml version="1.0"?>
+<robot name="coin">
+  <link name="coin">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="coin.obj" scale="1000 1000 1000"/>
+      </geometry>
+    </visual>
+
+    <collision>
+      <origin xyz="0 0 -2.0" rpy="0 0 0"/>
+      <geometry>
+        <cylinder length="2.0" radius="13.5"/>
+      </geometry>
+    </collision>
+
+    <!-- Middle layer (largest radius) -->
+    <collision>
+      <origin xyz="0 0 0.0" rpy="0 0 0"/>
+      <geometry>
+        <cylinder length="2.0" radius="15.0"/>
+      </geometry>
+    </collision>
+
+    <!-- Top layer -->
+    <collision>
+      <origin xyz="0 0 2.0" rpy="0 0 0"/>
+      <geometry>
+        <cylinder length="2.0" radius="13.5"/>
+      </geometry>
+    </collision>
+
+    <collision name="sphere_0">
+      <origin xyz="12.817579913225957 -3.944304526105059e-31 -0.9373272623616337" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="2.0" />
+      </geometry>
+    </collision>
+
+    </link>
+</robot>
