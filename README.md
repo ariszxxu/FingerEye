@@ -2,6 +2,8 @@
 
 **Continuous and Unified Vision-Tactile Sensing for Dexterous Manipulation**
 
+![Teaser Overview](./teaser_overview.png)
+
 [![arXiv](https://img.shields.io/badge/arXiv-FingerEye-F5F5F7?style=flat-square&logo=arxiv&logoColor=111111&labelColor=F5F5F7&color=E8E8ED)](https://arxiv.org/pdf/2604.20689)
 [![Project Website](https://img.shields.io/badge/Project-Website-F5F5F7?style=flat-square&logo=safari&logoColor=111111&labelColor=F5F5F7&color=E8E8ED)](https://nus-lins-lab.github.io/FingerEyeWeb/)
 [![Hardware Guide](https://img.shields.io/badge/Hardware-Guide-F5F5F7?style=flat-square&logo=googledocs&logoColor=111111&labelColor=F5F5F7&color=E8E8ED)](https://docs.google.com/document/d/1jIsauCUubnpsnRZiPJ1yBQh4KIW-sTdFwxu0cdAxOfM/edit?tab=t.0)
