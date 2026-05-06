@@ -527,15 +527,9 @@
     </visual>
     
     <collision>
-      <origin xyz="-0.01 -0.002415 0" rpy="3.1415 1.57 0"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry>
-        <mesh filename="leap_hand_meshes/visual/soft_ring_adjust.STL"/>
-      </geometry>
-    </collision>
-    <collision>
-      <origin xyz="-0.01 -0.002415 0" rpy="0 1.57 0"/>
-      <geometry>
-        <mesh filename="leap_hand_meshes/visual/acrylic_board_adjust.STL"/>
+        <mesh filename="leap_hand_meshes/collision/soft_ring_acrylic_convex_hull.obj"/>
       </geometry>
     </collision>
   
@@ -801,15 +795,9 @@
     </visual> -->
 
     <collision>
-      <origin xyz="-0.01 -0.002415 0.0" rpy="3.1415 1.57 0"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry>
-        <mesh filename="leap_hand_meshes/visual/soft_ring_adjust.STL"  />
-      </geometry>
-    </collision>
-    <collision>
-      <origin xyz="-0.01 -0.002415 0.0" rpy="0 1.57 0"/>
-      <geometry>
-        <mesh filename="leap_hand_meshes/visual/acrylic_board_adjust.STL" />
+        <mesh filename="leap_hand_meshes/collision/soft_ring_acrylic_convex_hull.obj"/>
       </geometry>
     </collision>
   </link>
@@ -1069,16 +1057,9 @@
     </visual>
 
     <collision>
-      <origin xyz="-0.01 -0.002415 0" rpy="3.1415 1.57 0"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry>
-        <mesh filename="leap_hand_meshes/visual/soft_ring_adjust.STL"/>
-      </geometry>
-    </collision>
-
-    <collision>
-      <origin xyz="-0.01 -0.002415 0" rpy="0 1.57 0"/>
-      <geometry>
-        <mesh filename="leap_hand_meshes/visual/acrylic_board_adjust.STL"/>
+        <mesh filename="leap_hand_meshes/collision/soft_ring_acrylic_convex_hull.obj"/>
       </geometry>
     </collision>
 
@@ -1391,16 +1372,9 @@
     </visual> -->
 
     <collision>
-      <origin xyz="-0.01 -0.002415 0.0" rpy="3.1415 1.57 0"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry>
-        <mesh filename="leap_hand_meshes/visual/soft_ring_adjust.STL"/>
-      </geometry>
-    </collision>
-
-    <collision>
-      <origin xyz="-0.01 -0.002415 0.0" rpy="0 1.57 0"/>
-      <geometry>
-        <mesh filename="leap_hand_meshes/visual/acrylic_board_adjust.STL"/>
+        <mesh filename="leap_hand_meshes/collision/soft_ring_acrylic_convex_hull.obj"/>
       </geometry>
     </collision>
   </link>
@@ -1456,4 +1430,3 @@
   </joint>
 
 </robot>
-
