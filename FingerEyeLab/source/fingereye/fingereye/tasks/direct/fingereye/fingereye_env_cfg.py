@@ -1,37 +1,54 @@
+import copy
 import math
 import gymnasium as gym
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
-from isaaclab.assets import AssetBaseCfg
-from isaaclab.assets import RigidObjectCfg
 from isaaclab.assets.articulation import ArticulationCfg
-from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
-from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
-from isaaclab_assets.robots.allegro import ALLEGRO_HAND_CFG
-import isaaclab.sim as sim_utils
-from isaaclab.assets import ArticulationCfg, RigidObjectCfg
 from isaaclab.envs import DirectRLEnvCfg
-from isaaclab.markers import VisualizationMarkersCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import PhysxCfg, SimulationCfg, RenderCfg
 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab.sensors import TiledCameraCfg
 
 from pathlib import Path
 FILE_PATH = Path(__file__).resolve()
 DIR_PATH = FILE_PATH.parent.parent.parent.parent.parent.parent.parent  
 
+
+def set_all_camera_resolution(cfg, width: int = 640, height: int = 480) -> None:
+    cfg.img_w = width
+    cfg.img_h = height
+    for attr_name in (
+        "cam_third_view",
+        "cam_wrist",
+        "cam_index_tip",
+        "cam_index_root",
+        "cam_thumb_tip",
+        "cam_thumb_root",
+    ):
+        if hasattr(cfg, attr_name):
+            camera_cfg = copy.deepcopy(getattr(cfg, attr_name))
+            camera_cfg.width = width
+            camera_cfg.height = height
+            setattr(cfg, attr_name, camera_cfg)
+
 @configclass
 class FingerEyeRandomizationCfg:
-    enable_all: bool = True
+    enable_all: bool = False
     visible_in_primary_ray: bool = False
         
-    random_lighting: bool = True          
-    random_coin_color: bool = True        
-    random_background: bool = True 
-    random_camera_noise: bool = True
+    random_lighting: bool = False
+    random_object_color: bool = False
+    random_background: bool = False
+    random_camera_noise: bool = False
+    mild_object_color_noise: bool = False
+    mild_object_color_base: tuple[float, float, float] = (1.0, 0.82, 0.05)
+    mild_object_color_noise_scale: float = 0.1
+    random_lighting_intensity_range: tuple[float, float] = (2.0e5, 5.0e6)
+    random_lighting_white_jitter: float = 0.05
+    random_floor_base_gray: float = 0.7
+    random_floor_delta: float = 0.3
 
 # Default environment configuration for FingerEye in Isaac Lab.
 @configclass
@@ -41,6 +58,7 @@ class FingerEyeLabEnvCfg(DirectRLEnvCfg):
     n_env_record = 16
     rollout_record_interval = 1
     replay_mode = False
+    num_rerenders_on_reset = 0
     # env
     decimation = 6
     episode_length_s = 20.0
@@ -114,19 +132,6 @@ class FingerEyeLabEnvCfg(DirectRLEnvCfg):
         },
     )
 
-    object_cfg = RigidObjectCfg(
-        prim_path="/World/envs/env_.*/Coin",
-        spawn=sim_utils.UsdFileCfg(
-            usd_path=f"{DIR_PATH}/assets/objects/coin/coin_isaac_sim/xarm_leap_2.usda",
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(),
-            mass_props=sim_utils.MassPropertiesCfg(density=50.0),
-            visual_material=sim_utils.PreviewSurfaceCfg(
-                diffuse_color=(1.0, 1.0, 0.0)  # RGB for Yellow
-            ),
-        ),
-        init_state=RigidObjectCfg.InitialStateCfg(rot=(1, 0, 0, 0)),
-    )
-
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
         num_envs=16, env_spacing=10, replicate_physics=True,
@@ -146,16 +151,11 @@ class FingerEyeLabEnvCfg(DirectRLEnvCfg):
                                 'leap_8','leap_9','leap_10','leap_11', # ring
                                 'leap_12','leap_13','leap_14','leap_15'] # thumb
 
-    coin_x_min = 0.34
-    coin_x_max = 0.46 
-    coin_y_min = 0.04
-    coin_y_max = 0.06
-    coin_z = 0.0155
     # Randomize 
     randomization: FingerEyeRandomizationCfg = FingerEyeRandomizationCfg(
         enable_all=False,
         random_lighting=False,
-        random_coin_color=False,
+        random_object_color=False,
         random_background=False,
         random_camera_noise=False,
     )
@@ -168,7 +168,7 @@ class FingerEyeLabEnvCfg(DirectRLEnvCfg):
     img_h = 192
 
     # Only cameras in this list will be initialized and rendered.
-    camera_name_list = ["third_view", "wrist_camera", "index_root", "index_tip", "thumb_root", "thumb_tip"]
+    camera_name_list = ["third_view", "wrist_camera", "index_tip", "index_root", "thumb_tip", "thumb_root"]
 
     # -----------------------------------------------------------------------
     # Camera Definitions
@@ -248,6 +248,23 @@ class FingerEyeLabEnvCfg(DirectRLEnvCfg):
     enabled_tag_joints_prefix = ["fingertip_holder", # index
                                  "thumb_holder"]  # thumb
     # fingertip_2 | middle ; fingertip_3 | ring 
+    # Fingertip tag point observations. The tag/acrylic face lies in local Y-Z,
+    # and the outward normal is local -X. Corner order is lower-left,
+    # lower-right, upper-right, upper-left in that Y-Z face.
+    enable_fingertip_tag_points = True
+    fingertip_tag_corner_half_width = 0.020845
+    fingertip_tag_corner_half_height = 0.01500
+
+    # -----------------------------------------------------------------------
+    # Fingertip surface geometry
+    # -----------------------------------------------------------------------
+    contact_fingertip_link_names = ["fingertip", "thumb_soft_ring"]
+    contact_grid_height = 64
+    contact_grid_width = 96
+    contact_surface_width = 0.04169   # link-y span of the acrylic board face, meters
+    contact_surface_height = 0.03000  # link-z span of the acrylic board face, meters
+    contact_d_max = 0.020
+    contact_surface_center_link = (-0.0110, -0.002415, 0.0)
 
 
 @configclass
@@ -257,19 +274,13 @@ class FingerEyeTeleopLabEnvCfg(FingerEyeLabEnvCfg):
         num_envs=1, env_spacing=10, replicate_physics=True, # clone_in_fabric=True
     )
     camera_name_list = ["third_view",]
+    enable_fingertip_tag_points = False
+    teleop_third_view_eye = (0.40, 0.2, 0.22)
+    teleop_third_view_rot_opengl = (0.0, 0.0, 0.3022762529, 0.9532203664)
 
-@configclass
-class FingerEyeReplayLabEnvCfg(FingerEyeLabEnvCfg):
-    replay_mode = True
-
-@configclass
-class FingerEyeReplayRandomLabEnvCfg(FingerEyeLabEnvCfg):
-    replay_mode = True
-    randomization: FingerEyeRandomizationCfg = FingerEyeRandomizationCfg(
-        enable_all  = False,
-        random_lighting= True,
-        random_coin_color= True,   
-        random_background= True,
-        random_camera_noise= True,
-        visible_in_primary_ray = False, # dark sky
-    )
+    def __post_init__(self):
+        super().__post_init__()
+        self.cam_third_view = copy.deepcopy(self.cam_third_view)
+        self.cam_third_view.offset.pos = self.teleop_third_view_eye
+        self.cam_third_view.offset.rot = self.teleop_third_view_rot_opengl
+        set_all_camera_resolution(self, 320, 240)

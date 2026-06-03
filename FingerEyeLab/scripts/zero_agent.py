@@ -55,7 +55,7 @@ def main():
     if args_cli.no_rand_light:
         env_cfg.randomization.random_lighting = False
     if args_cli.no_rand_coin:
-        env_cfg.randomization.random_coin_color = False
+        env_cfg.randomization.random_object_color = False
     if args_cli.no_rand_camera:
         env_cfg.randomization.random_camera_noise = False
     # create environment

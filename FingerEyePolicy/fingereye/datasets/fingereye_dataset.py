@@ -127,7 +127,7 @@ class FingerEyeDataset(BaseDataset):
                 or key.endswith("_ang_vel")
                 or key.endswith("_lin_vel")
                 or key.endswith("current_rgb_camera_poses")
-                or key.endswith("current_rs_camera_poses")  # create limit(range) normalizer for camera poses, as in RoboPan
+                or key.endswith("current_rs_camera_poses")  # create limit(range) normalizer for camera poses
             ):
                 # states / original_actions / qpos / qvel / pos / ang_vel / lin_vel : shape (..., d_state or d_action)
                 normalizer[key] = SingleFieldLinearNormalizer().create_fit(

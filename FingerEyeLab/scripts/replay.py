@@ -447,7 +447,7 @@ class SimulatorReplayer:
         cprint("✅ Frame Level Replay Done (Linear Strategy)", "green")
 
 
-@hydra.main(config_path=str(DIR_PATH / "configs"), config_name="coin_flipping", version_base="1.1")
+@hydra.main(config_path=str(DIR_PATH / "configs"), config_name="fingereye_lab", version_base="1.1")
 def main(config):
     # 1. Parse Config
     env_cfg = parse_env_cfg(

@@ -45,8 +45,6 @@ policy:
   nv: ${setting.nv}
   use_rs_indices: ${setting.use_rs_indices}
   use_camera_indices: ${setting.use_camera_indices}
-  n_tags : ${setting.n_tags}
-  n_tag_steps : ${setting.n_tag_steps}
   # sim or not 
   use_sim_pose_decoder: ${setting.use_sim_pose_decoder}
 
@@ -63,6 +61,10 @@ policy:
   feedforward_activation: "gelu"
   dropout: 0.0
   pre_norm: False
+  group_encoding: True
+  group_decoding: True
+  n_fe_tokens: ${setting.n_fe_tokens}
+  state_keys: ${setting.state_keys}
 
 
 ema:

@@ -1,12 +1,9 @@
 import torch.nn.functional as F
-import torch.nn as nn
 import torch
 from typing import Dict
-from itertools import chain
-from einops import rearrange
 from fingereye.utils.dataset.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
 from fingereye.policies.base_policy import BasePolicy
-from fingereye.policies.fingereye.fingereye_encoder import FingerEyeEncoder, ACTImageEncoder
+from fingereye.policies.fingereye.fingereye_encoder import FingerEyeEncoder
 from fingereye.policies.fingereye.fingereye_decoder import FingerEyeDecoder
 
 
@@ -21,8 +18,6 @@ class FingerEyePolicy(BasePolicy):
         nv=5,  # number of views
         use_rs_indices=[],
         use_camera_indices=[],
-        n_tags=0,
-        n_tag_steps=0,
         use_sim_pose_decoder=False,
 
         # other dimensions
@@ -43,44 +38,30 @@ class FingerEyePolicy(BasePolicy):
     ):
         super().__init__()
 
-        use_resnet_encoder = kwargs.get("use_resnet_encoder", False)
-        use_robopan_embedding = kwargs.get("use_robopan_embedding", False)
+        group_encoding = bool(kwargs.get("group_encoding", False))
+        group_decoding = bool(kwargs.get("group_decoding", False))
+        n_fe_tokens = kwargs.get("n_fe_tokens", len(use_camera_indices))
+        self.state_keys = kwargs.get("state_keys", None)
 
-        if not use_resnet_encoder:
-            # use RADIO-based encoder
-            self.encoder = FingerEyeEncoder(
-                nv=nv,
-                n_obs_steps=n_obs_steps,
-
-                n_encoder_layers=n_encoder_layers,
-                dim_model=dim_model,
-                n_heads=n_heads,   
-                dim_feedforward=dim_feedforward,
-                feedforward_activation=feedforward_activation,
-                dropout=dropout,
-                pre_norm=pre_norm,
-
-                use_robopan_embedding=use_robopan_embedding,
-            )
-        else:
-            # use original ACT image encoder with ResNet backbone
-            self.encoder = ACTImageEncoder(
-                n_encoder_layers=n_encoder_layers,
-                dim_model=dim_model,
-                n_heads=n_heads,   
-                dim_feedforward=dim_feedforward,
-                feedforward_activation=feedforward_activation,
-                dropout=dropout,
-                pre_norm=pre_norm,
-            )
+        self.encoder = FingerEyeEncoder(
+            nv=nv,
+            n_obs_steps=n_obs_steps,
+            n_encoder_layers=n_encoder_layers,
+            dim_model=dim_model,
+            n_heads=n_heads,
+            dim_feedforward=dim_feedforward,
+            feedforward_activation=feedforward_activation,
+            dropout=dropout,
+            pre_norm=pre_norm,
+            group_encoding=group_encoding,
+            n_fe_tokens=n_fe_tokens,
+        )
 
         self.decoder = FingerEyeDecoder(
             n_obs_steps=n_obs_steps,
             horizon=horizon,
             ds=ds,
             da=da,
-            n_tags=n_tags,
-            n_tag_steps=n_tag_steps,
             use_sim_pose_decoder=use_sim_pose_decoder,
 
             n_decoder_layers=n_decoder_layers,
@@ -90,6 +71,7 @@ class FingerEyePolicy(BasePolicy):
             feedforward_activation=feedforward_activation,
             dropout=dropout,
             pre_norm=pre_norm,
+            group_decoding=group_decoding,
         )
 
         self.use_rs_indices = list(use_rs_indices)
@@ -102,10 +84,11 @@ class FingerEyePolicy(BasePolicy):
         self.horizon = horizon
         self.n_action_steps = n_action_steps
         self.n_obs_steps = n_obs_steps
-        self.n_tag_steps = n_tag_steps
         self.kwargs = kwargs
-        self.use_robopan_embedding = use_robopan_embedding
         self.use_sim_pose_decoder = use_sim_pose_decoder
+        self.group_encoding = group_encoding
+        self.group_decoding = group_decoding
+        self._param_debug_logged = False
 
     # ========= training  ============
     def set_normalizer(self, normalizer: LinearNormalizer):
@@ -139,23 +122,9 @@ class FingerEyePolicy(BasePolicy):
         else:
             radio_summary = torch.cat(radio_list, dim=2)  # (b, To*ncam, d)
 
-        # for robopan embedding
-        camera_poses = None 
-        if self.use_robopan_embedding:
-            camera_poses_list = []
-            if "obs/current_rgb_camera_poses" in obs_dict and len(self.use_camera_indices) > 0:
-                rgb_camera_poses = obs_dict["obs/current_rgb_camera_poses"][:, :, self.use_camera_indices]  # (b, To, nfingereye x 2, 3+6)
-                camera_poses_list.append(rgb_camera_poses)
-            if "obs/current_rs_camera_poses" in obs_dict and len(self.use_rs_indices) > 0:
-                rs_camera_poses = obs_dict["obs/current_rs_camera_poses"][:, :, self.use_rs_indices]  # (b, To, nrs, 3+6)
-                camera_poses_list.append(rs_camera_poses)
-            camera_poses = torch.cat(camera_poses_list, dim=2)  # (b, To, ncam, 3+9)  
-            camera_poses = camera_poses[..., :3+6]  # use the first 6 elements of the rotation matrix as in RoboPan
-
         encoded_feats = self.encoder(
-            images=images,  # (b, To*ncam, 3, h,
-            radio_summary=radio_summary,  # (b, To*ncam, d)
-            camera_poses=camera_poses  # (b, ncam, 3+6)
+            images=images,
+            radio_summary=radio_summary,
         )  # (b, ncam, dim_model)
         return encoded_feats
 
@@ -171,7 +140,7 @@ class FingerEyePolicy(BasePolicy):
         nbatch = self.normalizer.normalize(batch)
         nbatch_To1 = {}
         for k, v in batch.items():
-            if k.startswith("obs/") and k != "obs/current_center_tag_T":
+            if k.startswith("obs/"):
                 nbatch_To1[k] = nbatch[k][:, : self.n_obs_steps]
             else:
                 nbatch_To1[k] = nbatch[k]
@@ -190,7 +159,7 @@ class FingerEyePolicy(BasePolicy):
             nsim_batch = self.sim_normalizer.normalize(sim_batch)
             nsim_batch_To1 = {}
             for k, v in sim_batch.items():
-                if k.startswith("obs/") and k != "obs/current_center_tag_T":
+                if k.startswith("obs/"):
                     nsim_batch_To1[k] = nsim_batch[k][:, : self.n_obs_steps]
                 else:
                     nsim_batch_To1[k] = nsim_batch[k]
@@ -225,19 +194,16 @@ class FingerEyePolicy(BasePolicy):
         return loss_dict
 
     def forward(self, data_dict, sim_batch = None):
+        self._print_param_debug_once()
         encoded_feats = self.forward_encoder(data_dict)  # (b, ncam, dim_model)
         cam_pos_embed = None
         if isinstance(encoded_feats, tuple) and len(encoded_feats) == 2:
             encoded_feats, cam_pos_embed = encoded_feats
 
         state_in = self.get_state_vectors_from_obs(data_dict)  # (b, To*ds)
-        tag_in = None
-        if self.n_tag_steps > 0:
-            tag_in = self.get_tag_vectors_from_obs(data_dict)  # (b, n_tag_step*6)
         pred = self.decoder(
             encoded_feats=encoded_feats,  # (b, ncam, dim_model)
             state_in=state_in,  # (b, To*ds)
-            tag_in=tag_in,  # (b, n_tag_step*6)
             encoder_pos_embed=cam_pos_embed
         )
 
@@ -250,23 +216,33 @@ class FingerEyePolicy(BasePolicy):
     
     def get_state_vectors_from_obs(self, obs_dict):
         state_obs = []
-        sorted_keys = sorted(obs_dict.keys())
+        sorted_keys = list(self.state_keys) if self.state_keys is not None else sorted(obs_dict.keys())
         for k in sorted_keys:
+            if k not in obs_dict:
+                raise KeyError(f"Missing policy state key: {k}")
             if "obs/" in k and "images" not in k and "rays" not in k and "transform" not in k and "tag" not in k and "pose" not in k:
                 state_obs.append(obs_dict[k])
+        if len(state_obs) == 0:
+            raise ValueError("No state observations found for FingerEyePolicy.")
         state_obs = torch.cat(state_obs, dim=-1)
         state_obs = state_obs.view(state_obs.shape[0], -1)
         return state_obs
 
-    def get_tag_vectors_from_obs(self, obs_dict):
-        state_obs = []
-        sorted_keys = sorted(obs_dict.keys())
-        for k in sorted_keys:
-            if "obs/" in k and "tag" in k:
-                state_obs.append(obs_dict[k])
-        state_obs = torch.cat(state_obs, dim=-1)
-        state_obs = state_obs.view(state_obs.shape[0], -1)
-        return state_obs
+    def _print_param_debug_once(self):
+        if self._param_debug_logged:
+            return
+        encoder_params = sum(p.numel() for p in self.encoder.parameters())
+        group_encoder_params = sum(p.numel() for p in self.encoder.group_encoder.parameters())
+        decoder_params = sum(p.numel() for p in self.decoder.parameters())
+        structured_decoder_params = sum(p.numel() for p in self.decoder.decoder.parameters())
+        print("FingerEyePolicy parameter debug:")
+        print(f"  encoder_params={encoder_params}")
+        print(f"  group_encoder_params={group_encoder_params}")
+        print(f"  decoder_params={decoder_params}")
+        print(f"  decoder_core_params={structured_decoder_params}")
+        print(f"  group_encoding={self.group_encoding}")
+        print(f"  group_decoding={self.group_decoding}")
+        self._param_debug_logged = True
 
     def predict_action(
         self, obs_dict: Dict[str, torch.Tensor], action_key=None, is_first_frame=False
@@ -298,4 +274,3 @@ class FingerEyePolicy(BasePolicy):
         result["actions_pred"] = action_pred
         result["attention_weights"] = pred["attention_weights"]
         return result
-

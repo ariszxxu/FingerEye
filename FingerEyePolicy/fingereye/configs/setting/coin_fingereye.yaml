@@ -5,11 +5,11 @@ zarr_path: &zarr_path your_zarr_path.zarr
 ds: 8
 da: 8
 nv: 5
+n_fe_tokens: 4
+state_keys: ["obs/all_qpos"]
 
 use_rs_indices: [0]
 use_camera_indices: [0, 1, 2, 3]
-n_tags: 0
-n_tag_steps: 0
 use_sim_pose_decoder: False
 
 dataset:
@@ -20,9 +20,8 @@ dataset:
   pad_after: ${eval:'${horizon}-1'}
   seed: 42
   val_ratio: 0.00
-  max_train_episodes: 100
+  max_train_episodes: 50
   replay_buffer_keys: ["obs/all_qpos", 
                       "obs/rgb_images_radio",
                       "obs/rs_rgb_images_radio",  
                       "actions/original_actions"] 
-

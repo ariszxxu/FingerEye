@@ -8,8 +8,6 @@ nv: 1
 
 use_rs_indices: [0]
 use_camera_indices: []
-n_tags: 0
-n_tag_steps: 0
 use_sim_pose_decoder: False
 
 dataset:

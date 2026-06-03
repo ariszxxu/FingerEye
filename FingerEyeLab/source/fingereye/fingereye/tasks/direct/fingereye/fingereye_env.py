@@ -1,5 +1,4 @@
 import os
-import random
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -8,7 +7,7 @@ import torch
 
 import omni.kit.commands
 import omni.usd
-from pxr import Gf, Sdf, UsdGeom, UsdLux, UsdShade
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux, UsdShade
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, RigidObject
@@ -16,7 +15,7 @@ from isaaclab.envs import DirectRLEnv
 from isaaclab.sensors import TiledCamera
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.sim.utils import bind_visual_material, get_current_stage
-from isaaclab.utils.math import quat_apply, sample_uniform, matrix_from_quat
+from isaaclab.utils.math import quat_apply, matrix_from_quat
 import torch.nn.functional as F
 from .fingereye_env_cfg import FingerEyeLabEnvCfg
 
@@ -30,6 +29,26 @@ from .env_tools import (
     augment_image_batch,
     quat_to_M6,
 )
+
+
+def _quat_wxyz_to_matrix_np(quat: np.ndarray) -> np.ndarray:
+    quat = np.asarray(quat, dtype=np.float32)
+    quat = quat / max(float(np.linalg.norm(quat)), 1e-9)
+    w, x, y, z = quat.tolist()
+    return np.asarray(
+        [
+            [w * w + x * x - y * y - z * z, 2.0 * (x * y - w * z), 2.0 * (x * z + w * y)],
+            [2.0 * (x * y + w * z), w * w - x * x + y * y - z * z, 2.0 * (y * z - w * x)],
+            [2.0 * (x * z - w * y), 2.0 * (y * z + w * x), w * w - x * x - y * y + z * z],
+        ],
+        dtype=np.float32,
+    )
+
+
+def _gf_quat_to_wxyz_np(quat) -> np.ndarray:
+    imag = quat.GetImaginary()
+    return np.asarray([quat.GetReal(), imag[0], imag[1], imag[2]], dtype=np.float32)
+
 
 class FingerEyeLabEnv(DirectRLEnv):
     cfg: FingerEyeLabEnvCfg
@@ -99,6 +118,7 @@ class FingerEyeLabEnv(DirectRLEnv):
         
         dof_suffixes = ["_px", "_py", "_pz", "_rx", "_ry", "_rz"]
         collected_tag_indices = []
+        collected_tag_anchor_body_indices = []
 
         # Assuming cfg.enabled_tag_joints_prefix is the list ["fingertip_holder", "thumb_holder"]
         if hasattr(cfg, "enabled_tag_joints_prefix") and cfg.enabled_tag_joints_prefix:
@@ -115,12 +135,26 @@ class FingerEyeLabEnv(DirectRLEnv):
                 # Ensure we found all 6 DOFs for this tag
                 if len(indices) == 6:
                     collected_tag_indices.append(indices)
+                    anchor_body_name = prefix
+                    # Isaac may collapse zero-offset fixed links. thumb_holder is
+                    # fixed to thumb_fingertip in the URDF, so thumb_fingertip is
+                    # the correct world-frame anchor when thumb_holder is absent.
+                    if anchor_body_name not in self.hand.body_names and prefix == "thumb_holder":
+                        anchor_body_name = "thumb_fingertip"
+                    if anchor_body_name in self.hand.body_names:
+                        collected_tag_anchor_body_indices.append(self.hand.body_names.index(anchor_body_name))
+                    else:
+                        collected_tag_anchor_body_indices.append(-1)
+                        print(f"[WARNING] FingerEyeLabEnv: Tag anchor body '{prefix}' not found.")
                 else:
                     print(f"[ERROR] FingerEyeLabEnv: Incomplete DOFs for tag '{prefix}'. Found {len(indices)}/6.")
 
         # self.tag_joint_indices: shape = (n_tags, 6)
         # Columns correspond to [px, py, pz, rx, ry, rz] indices in the full q vector
         self.tag_joint_indices = torch.tensor(collected_tag_indices, dtype=torch.long, device=self.device)
+        self.tag_anchor_body_indices = torch.tensor(
+            collected_tag_anchor_body_indices, dtype=torch.long, device=self.device
+        )
 
 
         # 2 finger tip links 
@@ -134,16 +168,149 @@ class FingerEyeLabEnv(DirectRLEnv):
         
         # Convert to tensor for efficient indexing
         self.fingertip_indices = torch.tensor(self.fingertip_indices, dtype=torch.long, device=self.device)
+        self.surface_fingertip_link_names = list(getattr(self.cfg, "contact_fingertip_link_names", []))
+        surface_indices = []
+        for name in self.surface_fingertip_link_names:
+            if name in self.hand.body_names:
+                surface_indices.append(self.hand.body_names.index(name))
+            else:
+                print(f"[WARNING] Fingertip surface link '{name}' not found in articulation bodies.")
+        self.contact_fingertip_indices = torch.tensor(surface_indices, dtype=torch.long, device=self.device)
+
+    def _clone_camera_with_standard_xform_ops(self, stage, camera_cfg):
+        for prim in sim_utils.find_matching_prims(camera_cfg.prim_path, stage=stage):
+            prim_path = prim.GetPath().pathString
+            source_xformable = UsdGeom.Xformable(prim)
+            transform = Gf.Transform(source_xformable.GetLocalTransformation())
+            translation = Gf.Vec3d(transform.GetTranslation())
+            orientation = Gf.Quatd(transform.GetRotation().GetQuat())
+            scale = Gf.Vec3d(transform.GetScale())
+            reset_stack = source_xformable.GetResetXformStack()
+
+            attrs_to_copy = []
+            for attr in prim.GetAttributes():
+                attr_name = attr.GetName()
+                if attr_name.startswith("xformOp:") or attr_name == "xformOpOrder":
+                    continue
+                attr_value = attr.Get()
+                if attr_value is None:
+                    continue
+                attrs_to_copy.append((attr_name, attr.GetTypeName(), attr.IsCustom(), attr_value))
+
+            stage.RemovePrim(prim_path)
+            camera = UsdGeom.Camera.Define(stage, prim_path)
+            clean_prim = camera.GetPrim()
+            for attr_name, type_name, is_custom, attr_value in attrs_to_copy:
+                clean_attr = clean_prim.GetAttribute(attr_name)
+                if not clean_attr:
+                    clean_attr = clean_prim.CreateAttribute(attr_name, type_name, custom=is_custom)
+                clean_attr.Set(attr_value)
+
+            self._set_camera_xform_ops(clean_prim, translation, orientation, scale, reset_stack)
+
+    def _set_camera_xform_ops(self, prim, translation, orientation, scale, reset_stack=False):
+        xformable = UsdGeom.Xformable(prim)
+        with Sdf.ChangeBlock():
+            for prop_name in prim.GetPropertyNames():
+                if prop_name.startswith("xformOp:") or prop_name == "xformOpOrder":
+                    prim.RemoveProperty(prop_name)
+
+            xformable.SetXformOpOrder([], reset_stack)
+
+            translate_op = xformable.AddXformOp(UsdGeom.XformOp.TypeTranslate, UsdGeom.XformOp.PrecisionDouble, "")
+            orient_op = xformable.AddXformOp(UsdGeom.XformOp.TypeOrient, UsdGeom.XformOp.PrecisionDouble, "")
+            scale_op = xformable.AddXformOp(UsdGeom.XformOp.TypeScale, UsdGeom.XformOp.PrecisionDouble, "")
+            translate_op.Set(translation)
+            orient_op.Set(orientation)
+            scale_op.Set(scale)
+            xformable.SetXformOpOrder([translate_op, orient_op, scale_op], reset_stack)
+
+    def _standardize_camera_xform_ops(self, prim, source_prim=None):
+        xformable = UsdGeom.Xformable(prim)
+        source_xformable = UsdGeom.Xformable(source_prim) if source_prim is not None else xformable
+        transform = Gf.Transform(source_xformable.GetLocalTransformation())
+        translation = Gf.Vec3d(transform.GetTranslation())
+        orientation = Gf.Quatd(transform.GetRotation().GetQuat())
+        scale = Gf.Vec3d(transform.GetScale())
+        reset_stack = source_xformable.GetResetXformStack()
+        self._set_camera_xform_ops(prim, translation, orientation, scale, reset_stack)
+
+    def _camera_parent_body_name(self, prim_path: str) -> str | None:
+        parts = prim_path.replace(".*", "0").split("/")
+        if "xarm7" not in parts:
+            return None
+        idx = parts.index("xarm7")
+        if idx + 2 >= len(parts):
+            return None
+        return parts[-2]
+
+    def _camera_local_pose_from_cfg_or_stage(self, stage, camera_cfg):
+        if getattr(camera_cfg, "offset", None) is not None:
+            pos = np.asarray(camera_cfg.offset.pos, dtype=np.float32)
+            rot = _quat_wxyz_to_matrix_np(np.asarray(camera_cfg.offset.rot, dtype=np.float32))
+            return pos, rot
+
+        prims = list(sim_utils.find_matching_prims(camera_cfg.prim_path, stage=stage))
+        if len(prims) == 0:
+            return None, None
+        transform = Gf.Transform(UsdGeom.Xformable(prims[0]).GetLocalTransformation())
+        pos = np.asarray(transform.GetTranslation(), dtype=np.float32)
+        rot = _quat_wxyz_to_matrix_np(_gf_quat_to_wxyz_np(transform.GetRotation().GetQuat()))
+        return pos, rot
+
+    def _register_camera_body_pose_source(self, name: str, camera_cfg, stage) -> None:
+        body_name = self._camera_parent_body_name(camera_cfg.prim_path)
+        if body_name is None:
+            return
+        local_pos, local_rot = self._camera_local_pose_from_cfg_or_stage(stage, camera_cfg)
+        if local_pos is None or local_rot is None:
+            return
+        self._camera_body_names[name] = body_name
+        self._camera_local_pos[name] = torch.as_tensor(local_pos, dtype=torch.float32, device=self.device)
+        self._camera_local_rot[name] = torch.as_tensor(local_rot, dtype=torch.float32, device=self.device)
+
+    def _camera_pose_from_articulation(self, name: str, sensor_pose=None):
+        if name not in self._camera_body_indices:
+            body_name = self._camera_body_names.get(name)
+            if body_name is None or body_name not in self.hand.body_names:
+                return None
+            self._camera_body_indices[name] = self.hand.body_names.index(body_name)
+        body_idx = self._camera_body_indices[name]
+        body_pos_env = self.hand.data.body_pos_w[:, body_idx] - self.scene.env_origins
+        body_rot = matrix_from_quat(self.hand.data.body_quat_w[:, body_idx])
+        if name not in self._camera_runtime_local_pos and sensor_pose is not None:
+            sensor_pos = sensor_pose[:, :3].to(device=self.device, dtype=body_pos_env.dtype)
+            sensor_rot = sensor_pose[:, 3:].reshape(self.num_envs, 3, 3).to(device=self.device, dtype=body_rot.dtype)
+            body_rot_t = body_rot.transpose(1, 2)
+            self._camera_runtime_local_pos[name] = torch.bmm(
+                body_rot_t,
+                (sensor_pos - body_pos_env).unsqueeze(-1),
+            ).squeeze(-1).detach()
+            self._camera_runtime_local_rot[name] = torch.bmm(body_rot_t, sensor_rot).detach()
+
+        if name in self._camera_runtime_local_pos:
+            local_pos = self._camera_runtime_local_pos[name].to(device=self.device, dtype=body_pos_env.dtype)
+            local_rot = self._camera_runtime_local_rot[name].to(device=self.device, dtype=body_rot.dtype)
+        else:
+            local_pos = self._camera_local_pos[name].to(device=self.device, dtype=body_pos_env.dtype).view(1, 3)
+            local_rot = self._camera_local_rot[name].to(device=self.device, dtype=body_rot.dtype).view(1, 3, 3)
+            local_pos = local_pos.expand(self.num_envs, -1)
+            local_rot = local_rot.expand(self.num_envs, -1, -1)
+        cam_pos = body_pos_env + torch.bmm(body_rot, local_pos.unsqueeze(-1)).squeeze(-1)
+        cam_rot = torch.bmm(body_rot, local_rot)
+        return torch.cat([cam_pos, cam_rot.reshape(self.num_envs, -1)], dim=-1)
 
     def _setup_scene(self):
         self.hand = Articulation(self.cfg.robot_cfg)
-        self.object = RigidObject(self.cfg.object_cfg)
+        object_cfg = getattr(self.cfg, "object_cfg", None)
+        self.object = RigidObject(object_cfg) if object_cfg is not None else None
         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
         self.setup_gray_ground()
 
         self.scene.clone_environments(copy_from_source=False)
         self.scene.articulations["robot"] = self.hand
-        self.scene.rigid_objects["object"] = self.object
+        if self.object is not None:
+            self.scene.rigid_objects["object"] = self.object
         # UV Generation
         stage = omni.usd.get_context().get_stage()
         for env_id in range(self.num_envs):
@@ -173,30 +340,40 @@ class FingerEyeLabEnv(DirectRLEnv):
             }
 
             self._active_cameras = {} 
+            self._camera_body_names = {}
+            self._camera_body_indices = {}
+            self._camera_local_pos = {}
+            self._camera_local_rot = {}
+            self._camera_runtime_local_pos = {}
+            self._camera_runtime_local_rot = {}
 
             # Initialize requested cameras
             for name in self.cfg.camera_name_list:
-                if name in self._camera_configs:
-                    print(f"[INFO] Spawning Camera: {name} ({self.cfg.img_w}x{self.cfg.img_h})")
-                    sensor = TiledCamera(self._camera_configs[name])
+                if name in self._camera_configs and self._camera_configs[name] is not None:
+                    camera_cfg = self._camera_configs[name]
+                    print(f"[INFO] Spawning Camera: {name} ({camera_cfg.width}x{camera_cfg.height})")
+                    if camera_cfg.spawn is None:
+                        self._clone_camera_with_standard_xform_ops(stage, camera_cfg)
+                    sensor = TiledCamera(camera_cfg)
                     self.scene.sensors[name] = sensor
                     self._active_cameras[name] = sensor
+                    self._register_camera_body_pose_source(name, camera_cfg, stage)
 
     def _pre_physics_step(self, actions: torch.Tensor|dict) -> None:
         self.actions = actions
 
     def _apply_action(self) -> None:
         if self.cfg.replay_mode:
-            # replay mode, input (ne, num_dof + 3 + 4) for action, pos and rot
-            # robot action
             current_joints = self.actions[:, :self.num_hand_dofs] # (ne, num_dof)
             current_velocities = torch.zeros_like(current_joints)
             self.hand.write_joint_state_to_sim(position=current_joints, velocity=current_velocities)
-            # coin action
-            current_coin_pose = self.actions[:, self.num_hand_dofs:] # (ne, 7)
-            current_coin_pose[:, :3] += self.scene.env_origins # (ne, 3) # + self.scene.env_origins because we collected in local frame way
-            self.object.write_root_pose_to_sim(current_coin_pose)
-            self.object.write_root_velocity_to_sim(torch.zeros(self.num_envs, 6, dtype=torch.float, device=self.device))
+            if self.object is not None and self.actions.shape[1] >= self.num_hand_dofs + 7:
+                object_pose = self.actions[:, self.num_hand_dofs : self.num_hand_dofs + 7].clone()
+                object_pose[:, :3] += self.scene.env_origins
+                self.object.write_root_pose_to_sim(object_pose)
+                self.object.write_root_velocity_to_sim(
+                    torch.zeros(self.num_envs, 6, dtype=torch.float, device=self.device)
+                )
         else:
             self.cur_targets[:] = self.init_joint_values.clone()
             self.cur_targets[:, self.control_dof_indices] = self.actions
@@ -222,22 +399,26 @@ class FingerEyeLabEnv(DirectRLEnv):
             for name in self.cfg.camera_name_list:
                 if name in self._active_cameras:
                     cam_sensor = self._active_cameras[name]
-                    
-                    cam_data = cam_sensor.data.output["rgb"]
                 
                     pos_env = cam_sensor.data.pos_w - self.scene.env_origins
                     rot_mat = matrix_from_quat(cam_sensor.data.quat_w_world)
                     rot_9d = rot_mat.reshape(self.num_envs, -1)
                     
                     cam_pose = torch.cat([pos_env, rot_9d], dim=-1)
+                    body_cam_pose = self._camera_pose_from_articulation(name, cam_pose)
+                    if body_cam_pose is not None:
+                        cam_pose = body_cam_pose
 
                     if name in ["wrist_camera"]:
+                        cam_data = cam_sensor.data.output["rgb"]
                         rs_image_list.append(cam_data.unsqueeze(1)) 
                         rs_pose_list.append(cam_pose.unsqueeze(1)) 
                     elif name == "third_view":
+                        cam_data = cam_sensor.data.output["rgb"]
                         third_view_image = cam_data
                         third_view_pose = cam_pose
                     else:
+                        cam_data = cam_sensor.data.output["rgb"]
                         rgb_image_list.append(cam_data.unsqueeze(1))
                         rgb_pose_list.append(cam_pose.unsqueeze(1))
 
@@ -275,74 +456,187 @@ class FingerEyeLabEnv(DirectRLEnv):
         # -----------------------------------------------------------------------
         obs["current_joint_values"] = self.hand_dof_pos[:, self.control_dof_indices]
         obs["current_all_joint_values"] = self.hand_dof_pos.clone()
-        obs["coin_pose"] = torch.cat((self.object_pos, self.object_rot), dim=-1)
-        obs["coin_z_axis"] = quat_to_M6(self.object_rot)
-        obs["pos_of_coin"] = self.object_pos
+        if self.object is not None:
+            obs["object_pose"] = torch.cat((self.object_pos, self.object_rot), dim=-1)
+            obs["object_z_axis"] = quat_to_M6(self.object_rot)
+            obs["object_pos"] = self.object_pos
         # -----------------------------------------------------------------------
         # Tag Poses
         # -----------------------------------------------------------------------
         if self.tag_joint_indices.numel() > 0:
-            obs["current_center_tag_T"] = self.hand_dof_pos[:, self.tag_joint_indices]
+            current_center_tag_T = self.hand_dof_pos[:, self.tag_joint_indices]
+            obs["current_center_tag_T"] = current_center_tag_T
+            if getattr(self.cfg, "enable_fingertip_tag_points", False):
+                tag_points = self._compute_fingertip_tag_point_observation(
+                    current_center_tag_T
+                )
+                obs.update(tag_points)
         else:
             obs["current_center_tag_T"] = torch.empty((self.num_envs, 0, 6), device=self.device)
+            if getattr(self.cfg, "enable_fingertip_tag_points", False):
+                empty = torch.empty((self.num_envs, 0, 4, 3), device=self.device)
+                obs["fingertip_tag_points"] = empty
+                obs["fingertip_tag_points_current"] = empty
+                obs["fingertip_tag_points_local"] = empty
+                obs["fingertip_tag_points_canonical"] = empty
+                obs["fingertip_tag_points_delta"] = empty
+                obs["fingertip_tag_points_env"] = empty
+                obs["fingertip_tag_points_current_env"] = empty
+                obs["fingertip_tag_points_canonical_env"] = empty
+                obs["fingertip_tag_points_delta_env"] = empty
+                obs["fingertip_tag_points_world"] = empty
+                obs["fingertip_tag_points_current_world"] = empty
+                obs["fingertip_tag_points_canonical_world"] = empty
+                obs["fingertip_tag_points_delta_world"] = empty
 
         return obs
 
+    def _compute_fingertip_tag_point_observation(
+        self, current_center_tag_T: torch.Tensor
+    ) -> dict[str, torch.Tensor]:
+        """Return fingertip tag-board corner points in holder-local meters.
+
+        current_center_tag_T is ordered [px, py, pz, rx, ry, rz] per finger.
+        The holder joints are small residual tag-board offsets. The canonical
+        face is the holder-local Y-Z surface centered
+        at cfg.contact_surface_center_link, with outward normal along local -X.
+        Env/world variants are also exported so visualization and policy
+        experiments can choose either body-attached or pose-independent geometry.
+        """
+        n_tags = current_center_tag_T.shape[1]
+        dtype = current_center_tag_T.dtype
+        device = current_center_tag_T.device
+        half_w = float(getattr(self.cfg, "fingertip_tag_corner_half_width", 0.01051))
+        half_h = float(getattr(self.cfg, "fingertip_tag_corner_half_height", 0.00850))
+        center = torch.tensor(
+            getattr(self.cfg, "contact_surface_center_link", (-0.0110, -0.002415, 0.0)),
+            device=device,
+            dtype=dtype,
+        )
+        canonical = torch.tensor(
+            [
+                [0.0, -half_w, -half_h],
+                [0.0, -half_w, half_h],
+                [0.0, half_w, half_h],
+                [0.0, half_w, -half_h],
+            ],
+            device=device,
+            dtype=dtype,
+        ) + center.view(1, 3)
+        canonical = canonical.view(1, 1, 4, 3).expand(self.num_envs, n_tags, -1, -1)
+
+        translation = current_center_tag_T[..., :3]
+        rx, ry, rz = current_center_tag_T[..., 3], current_center_tag_T[..., 4], current_center_tag_T[..., 5]
+        rotation = self._euler_xyz_to_matrix(rx, ry, rz)
+        current_local = torch.matmul(canonical, rotation.transpose(-1, -2)) + translation[:, :, None, :]
+        delta_local = current_local - canonical
+
+        obs = {
+            # Backward-compatible default remains local holder-frame current points.
+            "fingertip_tag_points": current_local,
+            "fingertip_tag_points_current": current_local,
+            "fingertip_tag_points_local": current_local,
+            "fingertip_tag_points_canonical": canonical,
+            "fingertip_tag_points_delta": delta_local,
+        }
+
+        if self.contact_fingertip_indices.numel() == n_tags:
+            # Env/world points should be attached to the actual surface links,
+            # whose poses already include the holder residual transforms.
+            surface_pos_w = self.hand.data.body_pos_w[:, self.contact_fingertip_indices]
+            surface_quat_w = self.hand.data.body_quat_w[:, self.contact_fingertip_indices]
+            canonical_world = self._transform_tag_points_to_world(canonical, surface_pos_w, surface_quat_w)
+            current_world = canonical_world
+            origins = self.scene.env_origins[:, None, None, :]
+            canonical_env = canonical_world - origins
+            current_env = current_world - origins
+            obs.update(
+                {
+                    "fingertip_tag_points_world": current_world,
+                    "fingertip_tag_points_current_world": current_world,
+                    "fingertip_tag_points_canonical_world": canonical_world,
+                    "fingertip_tag_points_delta_world": current_world - canonical_world,
+                    "fingertip_tag_points_env": current_env,
+                    "fingertip_tag_points_current_env": current_env,
+                    "fingertip_tag_points_canonical_env": canonical_env,
+                    "fingertip_tag_points_delta_env": current_env - canonical_env,
+                }
+            )
+        return obs
+
+    @staticmethod
+    def _transform_tag_points_to_world(
+        points_local: torch.Tensor, anchor_pos_w: torch.Tensor, anchor_quat_w: torch.Tensor
+    ) -> torch.Tensor:
+        flat_points = points_local.reshape(-1, 3)
+        flat_quat = anchor_quat_w[:, :, None, :].expand(-1, -1, points_local.shape[2], -1).reshape(-1, 4)
+        flat_pos = anchor_pos_w[:, :, None, :].expand(-1, -1, points_local.shape[2], -1).reshape(-1, 3)
+        return (quat_apply(flat_quat, flat_points) + flat_pos).reshape_as(points_local)
+
+    @staticmethod
+    def _euler_xyz_to_matrix(rx: torch.Tensor, ry: torch.Tensor, rz: torch.Tensor) -> torch.Tensor:
+        cx, sx = torch.cos(rx), torch.sin(rx)
+        cy, sy = torch.cos(ry), torch.sin(ry)
+        cz, sz = torch.cos(rz), torch.sin(rz)
+
+        zeros = torch.zeros_like(rx)
+        ones = torch.ones_like(rx)
+        row0_x = torch.stack([ones, zeros, zeros], dim=-1)
+        row1_x = torch.stack([zeros, cx, -sx], dim=-1)
+        row2_x = torch.stack([zeros, sx, cx], dim=-1)
+        rot_x = torch.stack([row0_x, row1_x, row2_x], dim=-2)
+
+        row0_y = torch.stack([cy, zeros, sy], dim=-1)
+        row1_y = torch.stack([zeros, ones, zeros], dim=-1)
+        row2_y = torch.stack([-sy, zeros, cy], dim=-1)
+        rot_y = torch.stack([row0_y, row1_y, row2_y], dim=-2)
+
+        row0_z = torch.stack([cz, -sz, zeros], dim=-1)
+        row1_z = torch.stack([sz, cz, zeros], dim=-1)
+        row2_z = torch.stack([zeros, zeros, ones], dim=-1)
+        rot_z = torch.stack([row0_z, row1_z, row2_z], dim=-2)
+        return torch.matmul(rot_z, torch.matmul(rot_y, rot_x))
+
     def _get_rewards(self) -> torch.Tensor:
-        # self.coin_normal_w is refreshed in _compute_intermediate_values
-        normal_z_abs = torch.abs(self.coin_normal_w[:, 2])
-        angle_tolerance = 10 / 180 * np.pi # 5 degrees in radians
-        sin_angle_tolerance = np.sin(angle_tolerance) # 0.17453
-
-        # Reward Return Home: Only if success
-        fingertip_pos = self.hand.data.body_pos_w[:, self.fingertip_indices]  # (ne, n_fingertips, 3)
-        first_fingertip_pos = fingertip_pos[:, 0, :]  # (ne, 3)
-        second_fingertip_pos = fingertip_pos[:, 1, :]  # (ne, 3)
-        dist_between_fingertips = torch.norm(first_fingertip_pos - second_fingertip_pos, dim=-1)   # (ne,)
-
-        # Success Condition
-        is_standing = (normal_z_abs < sin_angle_tolerance) & (dist_between_fingertips > 0.12)
-        is_standing_float = is_standing.float()
-        reward = is_standing_float
-        return reward
+        return torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
-        # NOTE: simplify, never done, only success / not  
-        return False, False
+        terminated = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        time_out = self.episode_length_buf >= self.max_episode_length - 1
+        return terminated, time_out
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
         if env_ids is None:
             env_ids = self.hand._ALL_INDICES
         super()._reset_idx(env_ids)
+        env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
         random_env_ids = env_ids[1:]
         # randomizations
         if self.rand_cfg.enable_all or self.rand_cfg.random_lighting:
-            self._randomize_env_lighting(random_env_ids)
-        if self.rand_cfg.enable_all or self.rand_cfg.random_coin_color:
-            self._randomize_coin_mdl_color(random_env_ids)
+            self._randomize_env_lighting(
+                random_env_ids,
+                intensity_range=self.rand_cfg.random_lighting_intensity_range,
+                white_jitter=self.rand_cfg.random_lighting_white_jitter,
+            )
+        if self.rand_cfg.enable_all or self.rand_cfg.random_object_color:
+            self._randomize_object_visual_color(random_env_ids)
+        if self.rand_cfg.mild_object_color_noise:
+            self._randomize_object_visual_color_mild(random_env_ids)
         if self.rand_cfg.enable_all or self.rand_cfg.random_background:
             self._randomize_env_skybox(env_ids) # do not need randomize skybox
-            self._randomize_env_floor_color(random_env_ids, base_gray=0.7, delta=0.3)
-        # reset object
-        object_default_state = self.object.data.default_root_state.clone()[env_ids]
-        object_x = sample_uniform(
-            self.cfg.coin_x_min, self.cfg.coin_x_max, (len(env_ids),), device=self.device
-        )
-        object_y = sample_uniform(
-            self.cfg.coin_y_min, self.cfg.coin_y_max, (len(env_ids),), device=self.device
-        )
-        object_default_state[:, 0] = object_x
-        object_default_state[:, 1] = object_y
-        object_default_state[:, 2] = self.cfg.coin_z
-        object_default_state[:, 0:3] = (
-            object_default_state[:, 0:3] + self.scene.env_origins[env_ids]
-        )
-        object_default_state[:, 7:] = torch.zeros_like(self.object.data.default_root_state[env_ids, 7:])
-        self.object.write_root_pose_to_sim(object_default_state[:, :7], env_ids)
-        self.object.write_root_velocity_to_sim(object_default_state[:, 7:], env_ids)
-        print(f"[object pos]:{self.object.data.root_pos_w - self.scene.env_origins}")
+            self._randomize_env_floor_color(
+                random_env_ids,
+                base_gray=self.rand_cfg.random_floor_base_gray,
+                delta=self.rand_cfg.random_floor_delta,
+            )
+        self._reset_object_to_default(env_ids)
+        self._reset_hand(env_ids)
+        self.successes[env_ids] = 0
+        # Initialize obs/buffers immediately
+        self._compute_intermediate_values(env_ids)
+        self.sim.step()
 
-        # reset hand
+    def _reset_hand(self, env_ids: torch.Tensor):
         dof_pos = self.init_joint_values.unsqueeze(0).repeat(len(env_ids), 1)
         dof_vel = self.hand.data.default_joint_vel[env_ids] 
         self.prev_targets[env_ids] = dof_pos
@@ -352,10 +646,14 @@ class FingerEyeLabEnv(DirectRLEnv):
         self.hand.set_joint_position_target(dof_pos, env_ids=env_ids)
         self.hand.write_joint_state_to_sim(dof_pos, dof_vel, env_ids=env_ids)
 
-        self.successes[env_ids] = 0
-        # Initialize obs/buffers immediately
-        self._compute_intermediate_values(env_ids)
-        self.sim.step()
+    def _reset_object_to_default(self, env_ids: torch.Tensor):
+        if self.object is None:
+            return
+        object_default_state = self.object.data.default_root_state.clone()[env_ids]
+        object_default_state[:, 0:3] += self.scene.env_origins[env_ids]
+        object_default_state[:, 7:] = 0.0
+        self.object.write_root_pose_to_sim(object_default_state[:, :7], env_ids)
+        self.object.write_root_velocity_to_sim(object_default_state[:, 7:], env_ids)
 
 
     def _compute_intermediate_values(self, env_ids: Sequence[int] | None = None):
@@ -366,16 +664,12 @@ class FingerEyeLabEnv(DirectRLEnv):
         self.actuated_dof_pos = self.hand_dof_pos[:, self.actuated_dof_indices]
         self.hand_dof_vel = self.hand.data.joint_vel
 
-        # data for object
-        self.object_pos = self.object.data.root_pos_w - self.scene.env_origins
-        self.object_rot = self.object.data.root_quat_w
-        self.object_velocities = self.object.data.root_vel_w
-        self.object_linvel = self.object.data.root_lin_vel_w
-        self.object_angvel = self.object.data.root_ang_vel_w
-
-        # --- Calculate Coin Face Normal (World) ---
-        # Rot * Local_Y
-        self.coin_normal_w = quat_apply(self.object_rot, self.local_normal_vector)
+        if self.object is not None:
+            self.object_pos = self.object.data.root_pos_w - self.scene.env_origins
+            self.object_rot = self.object.data.root_quat_w
+            self.object_velocities = self.object.data.root_vel_w
+            self.object_linvel = self.object.data.root_lin_vel_w
+            self.object_angvel = self.object.data.root_ang_vel_w
 
     def replay_step(self, action: torch.Tensor):
         """Execute one time-step of the environment's dynamics.
@@ -414,36 +708,56 @@ class FingerEyeLabEnv(DirectRLEnv):
         is_rendering = self.sim.has_gui() or self.sim.has_rtx_sensors()
 
         # perform physics stepping
-        # set actions into buffers
-        self._apply_action()
-        # set actions into simulator
-        self.scene.write_data_to_sim()
-        # simulate
-        # self.sim.step(render=False)
-        # render between steps only if the GUI or an RTX sensor needs it
-        # note: we assume the render interval to be the shortest accepted rendering interval.
-        #    If a camera needs rendering at a faster frequency, this will lead to unexpected behavior.
-        self.sim.render()
-        # update buffers at sim dt
-        self.scene.update(dt=0)
+        if self.cfg.replay_mode:
+            # Replay writes recorded joint/object poses directly; avoid letting
+            # physics drift those poses between recorded frames. Update
+            # articulation kinematics and Fabric before rendering, otherwise RTX
+            # cameras can see the previous link transforms while tensors already
+            # contain the requested replay state.
+            self._apply_action()
+            self.scene.write_data_to_sim()
+            self.sim.forward()
+            self.sim.render()
+            self.scene.update(dt=0.0)
+        else:
+            # Match Isaac Lab's DirectRLEnv stepping: targets only become visible
+            # to cameras after the simulator advances. Rendering without sim.step
+            # leaves policy eval videos effectively stuck at the reset frame.
+            for _ in range(self.cfg.decimation):
+                self._sim_step_counter += 1
+                self._apply_action()
+                self.scene.write_data_to_sim()
+                self.sim.step(render=False)
+                if self._sim_step_counter % self.cfg.sim.render_interval == 0 and is_rendering:
+                    self.sim.render()
+                self.scene.update(dt=self.physics_dt)
 
         # post-step:
         # -- update env counters (used for curriculum generation)
         self.episode_length_buf += 1  # step in current episode (per env)
         self.common_step_counter += 1  # total step (common for all envs)
 
-        self.reset_terminated[:], self.reset_time_outs[:] = self._get_dones()
-        self.reset_buf = self.reset_terminated | self.reset_time_outs
-        self.reward_buf = self._get_rewards()
+        if self.cfg.replay_mode:
+            self.reset_terminated[:] = False
+            self.reset_time_outs[:] = False
+            self.reset_buf[:] = False
+            if not hasattr(self, "reward_buf"):
+                self.reward_buf = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+            self.reward_buf[:] = 0.0
+        else:
+            self.reset_terminated[:], self.reset_time_outs[:] = self._get_dones()
+            self.reset_buf = self.reset_terminated | self.reset_time_outs
+            self.reward_buf = self._get_rewards()
 
-        # -- reset envs that terminated/timed-out and log the episode information
-        reset_env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1)
-        if len(reset_env_ids) > 0:
-            self._reset_idx(reset_env_ids)
-            # if sensors are added to the scene, make sure we render to reflect changes in reset
-            if self.sim.has_rtx_sensors() and self.cfg.num_rerenders_on_reset > 0:
-                for _ in range(self.cfg.num_rerenders_on_reset):
-                    self.sim.render()
+            # -- reset envs that terminated/timed-out and log the episode information
+            reset_env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1)
+            if len(reset_env_ids) > 0:
+                self._reset_idx(reset_env_ids)
+                # if sensors are added to the scene, make sure we render to reflect changes in reset
+                num_rerenders_on_reset = int(getattr(self.cfg, "num_rerenders_on_reset", 0))
+                if self.sim.has_rtx_sensors() and num_rerenders_on_reset > 0:
+                    for _ in range(num_rerenders_on_reset):
+                        self.sim.render()
 
         # post-step: step interval event
         if self.cfg.events:
@@ -480,25 +794,66 @@ class FingerEyeLabEnv(DirectRLEnv):
         self.skybox_folders = folders
         self.skybox_hdr_files = hdr_files
 
-    def _randomize_coin_mdl_color(self, env_ids=None):
+    def _object_prim_name(self) -> str | None:
+        object_cfg = getattr(self.cfg, "object_cfg", None)
+        if object_cfg is None:
+            return None
+        return str(object_cfg.prim_path).rstrip("/").split("/")[-1]
+
+    def _randomize_object_visual_color(self, env_ids=None):
+        if self.object is None:
+            return
         stage = omni.usd.get_context().get_stage()
 
         if env_ids is None:
             env_ids = range(self.num_envs)
+        object_prim_name = self._object_prim_name()
+        if object_prim_name is None:
+            return
 
         for i in env_ids:
-            r = random.random()   
-            g = random.random()
-            b = random.random()
-            color = Gf.Vec3f(r, g, b)
-            shader_path = f"/World/envs/env_{i}/Coin/material/Shader"
-            prim = stage.GetPrimAtPath(shader_path)
-            if not prim.IsValid():
-                continue
+            color = Gf.Vec3f(
+                float(torch.rand((), device=self.device).item()),
+                float(torch.rand((), device=self.device).item()),
+                float(torch.rand((), device=self.device).item()),
+            )
+            self._set_object_visual_color(stage, int(i), object_prim_name, color)
 
-            attr_name = "inputs:diffuseColor"
-            attr = prim.GetAttribute(attr_name)
-            attr.Set(color)
+    def _randomize_object_visual_color_mild(self, env_ids=None):
+        if self.object is None:
+            return
+        stage = omni.usd.get_context().get_stage()
+
+        if env_ids is None:
+            env_ids = range(self.num_envs)
+        object_prim_name = self._object_prim_name()
+        if object_prim_name is None:
+            return
+
+        base = torch.tensor(self.rand_cfg.mild_object_color_base, device=self.device, dtype=torch.float32)
+        scale = float(self.rand_cfg.mild_object_color_noise_scale)
+
+        for i in env_ids:
+            noise = torch.empty(3, device=self.device).uniform_(-scale, scale)
+            color_tensor = torch.clamp(base + noise, 0.0, 1.0)
+            color = Gf.Vec3f(*[float(value) for value in color_tensor.tolist()])
+            self._set_object_visual_color(stage, int(i), object_prim_name, color)
+
+    def _set_object_visual_color(self, stage, env_id: int, object_prim_name: str, color: Gf.Vec3f) -> None:
+        object_root = stage.GetPrimAtPath(f"/World/envs/env_{env_id}/{object_prim_name}")
+        if not object_root.IsValid():
+            return
+        for prim in Usd.PrimRange(object_root):
+            if prim.IsA(UsdGeom.Gprim):
+                gprim = UsdGeom.Gprim(prim)
+                color_attr = gprim.GetDisplayColorAttr()
+                if not color_attr:
+                    color_attr = gprim.CreateDisplayColorAttr()
+                color_attr.Set([color])
+            if prim.GetTypeName() == "Shader":
+                attr = prim.GetAttribute("inputs:diffuseColor")
+                if attr:
+                    attr.Set(color)
 
     def _setup_env_lights(self):
 
@@ -773,4 +1128,3 @@ class FingerEyeLabEnv(DirectRLEnv):
 
         # Force bind this material to the ground, overriding the grid
         bind_visual_material(ground_path, material_path)
-

@@ -265,7 +265,7 @@ class SimulatorRecorder:
                     self.record_step(target_viser_joints_np, obs)
 
     def load_policy(self):
-        from contac.workspaces.workspace import TrainWorkspace
+        from fingereye.workspaces.workspace import TrainWorkspace
         assert Path(self.config.eval_ckpt_path).exists(), f"❌ Cannot find eval checkpoint: {self.config.eval_ckpt_path}"
         if not hasattr(self.config, 'eval_ckpt_config_path') or self.config.eval_ckpt_config_path is None:
             # try to find the config file in the same dir as the checkpoint
@@ -279,15 +279,14 @@ class SimulatorRecorder:
         self.actions_to_rollout = deque(maxlen=workspace_config.n_action_steps)
         self.obs_to_takein = deque(maxlen=workspace_config.n_obs_steps)
         self.replay_buffer_keys = workspace_config.setting.dataset.replay_buffer_keys
-        self.n_tag_steps = 0
-        if hasattr(workspace_config.policy, 'n_tag_steps'):
-            self.n_tag_steps = workspace_config.policy.n_tag_steps
-            self.tags_to_takein = deque(maxlen=self.n_tag_steps)
         self.n_obs_steps = workspace_config.n_obs_steps
         # get the action form 
         self.stage = workspace_config.training.get("stage", "joint")
         self.action_key = "actions/original_actions"
         self.action_form = "absolute_joint_values"
+        self.eval_policy_batch_size = int(getattr(self.config, "eval_policy_batch_size", 0) or 0)
+        if self.eval_policy_batch_size > 0:
+            print(f"[INFO] Eval policy batch size: {self.eval_policy_batch_size}")
 
     def image2radio(self, images):
         b, nobs, nv, c, h, w = images.shape
@@ -298,10 +297,57 @@ class SimulatorRecorder:
         return feat_summary
 
 
+    def _predict_action_once(self, obs_dict):
+        if self.stage != "joint":
+            return self.policy.predict_action(
+                obs_dict,
+                action_key=self.action_key,
+                stage=self.stage,
+            )
+        return self.policy.predict_action(
+            obs_dict,
+            action_key=self.action_key,
+        )
+
+    def _predict_action_batched(self, obs_dict):
+        batch_size = int(getattr(self, "eval_policy_batch_size", 0) or 0)
+        first_tensor = next((value for value in obs_dict.values() if torch.is_tensor(value)), None)
+        if first_tensor is None:
+            return self._predict_action_once(obs_dict)
+
+        n_envs = int(first_tensor.shape[0])
+        if batch_size <= 0 or batch_size >= n_envs:
+            return self._predict_action_once(obs_dict)
+
+        action_chunks = []
+        action_pred_chunks = []
+        attention_chunks = []
+        for start in range(0, n_envs, batch_size):
+            end = min(start + batch_size, n_envs)
+            chunk_obs = {
+                key: value[start:end] if torch.is_tensor(value) and value.shape[0] == n_envs else value
+                for key, value in obs_dict.items()
+            }
+            chunk_pred = self._predict_action_once(chunk_obs)
+            action_chunks.append(chunk_pred["actions"])
+            if "actions_pred" in chunk_pred:
+                action_pred_chunks.append(chunk_pred["actions_pred"])
+            if torch.is_tensor(chunk_pred.get("attention_weights")):
+                attention_chunks.append(chunk_pred["attention_weights"])
+            del chunk_pred
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        result = {"actions": torch.cat(action_chunks, dim=0)}
+        if len(action_pred_chunks) == len(action_chunks):
+            result["actions_pred"] = torch.cat(action_pred_chunks, dim=0)
+        if len(attention_chunks) == len(action_chunks):
+            result["attention_weights"] = torch.cat(attention_chunks, dim=0)
+        return result
+
     def get_action_from_policy(self, ot_dict):
         ######################
         ot_tensor_dict = {}
-        tag_tensor_dict = {}
         if "current_rgb_images" in ot_dict and ot_dict["current_rgb_images"] is not None:
             current_rgb_images = (ot_dict["current_rgb_images"] / 255.0).unsqueeze(1).permute(0, 1, 2, 5, 3, 4) #(ne, To=1, nv, h, w, 3) -> (ne, To=1, nv, 3, h, w)
             # ot_tensor_dict["obs/rgb_images_radio"] = self.image2radio(current_rgb_images)
@@ -312,11 +358,15 @@ class SimulatorRecorder:
             ot_tensor_dict["obs/rs_rgb_images"] = current_rs_images
         
         if "current_joint_values" in ot_dict and ot_dict["current_joint_values"] is not None:
-            ot_tensor_dict["obs/all_qpos"] = ot_dict["current_joint_values"].unsqueeze(1) # (ne, To=1, n_joint)
-        if "current_center_tag_T" in ot_dict and ot_dict["current_center_tag_T"] is not None:
-            tag_tensor_dict["obs/current_center_tag_T"] = ot_dict["current_center_tag_T"].unsqueeze(1) # (ne, 1, nv//2, 6)
-            if self.n_tag_steps > 0:
-                self.tags_to_takein.append(tag_tensor_dict)
+            current_joint_values = ot_dict["current_joint_values"]
+            if "obs/all_qpos" in self.replay_buffer_keys:
+                all_qpos = current_joint_values
+                expected_ds = int(OmegaConf.select(self.workspace_config, "setting.ds", default=all_qpos.shape[-1]))
+                if expected_ds == all_qpos.shape[-1] + 3:
+                    if "hp_eef_pose" not in ot_dict or ot_dict["hp_eef_pose"] is None:
+                        raise RuntimeError("Policies using 11-D obs/all_qpos require obs['hp_eef_pose'] for EEF xyz.")
+                    all_qpos = torch.cat((ot_dict["hp_eef_pose"][:, :3], all_qpos), dim=-1)
+                ot_tensor_dict["obs/all_qpos"] = all_qpos.unsqueeze(1) # (ne, To=1, n_joint)
         if "current_rgb_camera_poses" in ot_dict and ot_dict["current_rgb_camera_poses"] is not None and "obs/current_rgb_camera_poses" in self.replay_buffer_keys:
             ot_tensor_dict["obs/current_rgb_camera_poses"] = ot_dict["current_rgb_camera_poses"].unsqueeze(1) # (ne, To=1, nv, 7)
         if "current_rs_camera_poses" in ot_dict and ot_dict["current_rs_camera_poses"] is not None and "obs/current_rs_camera_poses" in self.replay_buffer_keys:
@@ -329,23 +379,7 @@ class SimulatorRecorder:
                 self.obs_to_takein,
                 To=self.n_obs_steps,
             )
-            if self.n_tag_steps > 0:
-                tag_tensor_dict_take_in = self.concat_and_pad_obs(
-                    self.tags_to_takein,
-                    To=self.n_tag_steps,
-                )
-                ot_tensor_dict_take_in["obs/current_center_tag_T"] = tag_tensor_dict_take_in["obs/current_center_tag_T"]
-            if self.stage != "joint":
-                predictions = self.policy.predict_action(
-                    ot_tensor_dict_take_in,
-                    action_key=self.action_key,
-                    stage=self.stage,
-                )
-            else:
-                predictions = self.policy.predict_action(
-                    ot_tensor_dict_take_in,
-                    action_key=self.action_key,
-                )
+            predictions = self._predict_action_batched(ot_tensor_dict_take_in)
             pred_actions_to_rollout = predictions["actions"]  # (b, Ta, ndof)
             pred_actions_to_rollout = pred_actions_to_rollout.permute(1, 0, 2)  # (Ta, b, ndof)
             for Ta_action in pred_actions_to_rollout:
@@ -400,90 +434,92 @@ class SimulatorRecorder:
         # 3. Rollout Loop
         # -----------------------------------------------------------------------
         configure_seed(args_cli.seed, torch_deterministic=True)
-        with torch.inference_mode():
-            while step_count < max_steps:
-                
-                # --- A. Policy Inference ---
-                # Assume get_action_from_policy returns (Chunk_Size, Num_Envs, Action_Dim)
-                # OR (Num_Envs, Chunk_Size, Action_Dim). 
-                # We standardize to a list of (Num_Envs, Action_Dim)
+        while step_count < max_steps:
+            
+            # --- A. Policy Inference ---
+            # Assume get_action_from_policy returns (Chunk_Size, Num_Envs, Action_Dim)
+            # OR (Num_Envs, Chunk_Size, Action_Dim). 
+            # We standardize to a list of (Num_Envs, Action_Dim)
+            with torch.no_grad():
                 self.get_action_from_policy(obs)
 
-                    
-                # Check Global Stop
-                if step_count >= max_steps: break
-
-                # 1. Step Environment
-                # Note: self.env.step() ALREADY handles the decimation (control_dt).
-                # We do NOT need an inner loop for sim.dt here.
-                action = self.actions_to_rollout.popleft()
-                next_obs, reward, terminated, truncated, info = self.env.step(action)
                 
-                # Handle tuple return if using Gym wrapper
-                if isinstance(next_obs, tuple): next_obs = next_obs[0]
+            # Check Global Stop
+            if step_count >= max_steps: break
+
+            # 1. Step Environment
+            # Note: self.env.step() ALREADY handles the decimation (control_dt).
+            # We do NOT need an inner loop for sim.dt here.
+            action = self.actions_to_rollout.popleft()
+            next_obs, reward, terminated, truncated, info = self.env.step(action)
+            
+            # Handle tuple return if using Gym wrapper
+            if isinstance(next_obs, tuple): next_obs = next_obs[0]
+            
+            # 2. Track Success
+            # Success is Reward > 0.5 (assuming 0/1 reward) AND not previously successful
+            current_success = (reward > 0.5).flatten().to(self.env.device)
+            new_success = current_success & (~success_flags)
+            
+            # Mark success
+            success_flags = success_flags | new_success
+            # Record the step number for newly successful envs
+            steps_to_success[new_success] = step_count
+            
+            # 3. Video Recording Logic
+            if step_count % record_interval == 0:
+                # Extract images: (N, H, W, 3)
+                # Ensure they are on CPU/Numpy for video processing
+                current_imgs = next_obs["third_view"][record_indices]
                 
-                # 2. Track Success
-                # Success is Reward > 0.5 (assuming 0/1 reward) AND not previously successful
-                current_success = (reward > 0.5).flatten().to(self.env.device)
-                new_success = current_success & (~success_flags)
+                if last_seen_frames is None:
+                    last_seen_frames = current_imgs.clone()
                 
-                # Mark success
-                success_flags = success_flags | new_success
-                # Record the step number for newly successful envs
-                steps_to_success[new_success] = step_count
+                # Include newly successful envs once so the frozen frame shows the
+                # final success-state visuals instead of the previous frame.
+                active_mask = ~success_flags[record_indices] # (n_record,)
+                new_success_mask = new_success[record_indices]
+                update_mask = active_mask | new_success_mask
+                if update_mask.any():
+                    last_seen_frames[update_mask] = current_imgs[update_mask]
                 
-                # 3. Video Recording Logic
-                if step_count % record_interval == 0:
-                    # Extract images: (N, H, W, 3)
-                    # Ensure they are on CPU/Numpy for video processing
-                    current_imgs = next_obs["third_view"][record_indices]
-                    
-                    if last_seen_frames is None:
-                        last_seen_frames = current_imgs.clone()
-                    
-                    # Update 'last_seen_frames' ONLY for envs that have NOT succeeded yet.
-                    # This creates the "Freeze on Success" effect.
-                    active_mask = ~success_flags[record_indices] # (n_record,)
-                    if active_mask.any():
-                        last_seen_frames[active_mask] = current_imgs[active_mask]
-                    
-                    # Convert to Numpy for processing
-                    frames_np = last_seen_frames.cpu().numpy() # (N_rec, H, W, 3)
-                    
-                    # We create a list to hold the processed frames for this step
-                    annotated_frames = []
+                # Convert to Numpy for processing
+                frames_np = last_seen_frames.cpu().numpy() # (N_rec, H, W, 3)
+                
+                # We create a list to hold the processed frames for this step
+                annotated_frames = []
 
-                    # Check if this is the absolute last step of the episode
-                    is_last_step = (step_count >= max_steps - 1)
+                # Check if this is the absolute last step of the episode
+                is_last_step = (step_count >= max_steps - 1)
 
-                    # Iterate over each environment being recorded
-                    for i, global_env_idx in enumerate(record_indices):
-                        frame = frames_np[i] # Get the frozen or active frame
-                        is_success = success_flags[global_env_idx].item()
+                # Iterate over each environment being recorded
+                for i, global_env_idx in enumerate(record_indices):
+                    frame = frames_np[i] # Get the frozen or active frame
+                    is_success = success_flags[global_env_idx].item()
 
-                        if is_success:
-                            # 1. SUCCESS: Apply Green (Always apply if success flag is True)
-                            # Since the frame is "frozen" in last_seen_frames, 
-                            # we just overlay the green check every time we generate the video.
-                            frame = draw_status_overlay(frame, "success")
-                        
-                        elif is_last_step and not is_success:
-                            # 2. FAILURE: Apply Red (Only on the very last frame)
-                            frame = draw_status_overlay(frame, "fail")
-                        
-                        annotated_frames.append(frame)
+                    if is_success:
+                        # 1. SUCCESS: Apply Green (Always apply if success flag is True)
+                        # Since the frame is "frozen" in last_seen_frames, 
+                        # we just overlay the green check every time we generate the video.
+                        frame = draw_status_overlay(frame, "success")
                     
-                    # Convert back to numpy array for grid creation
-                    frames_np = np.stack(annotated_frames)
+                    elif is_last_step and not is_success:
+                        # 2. FAILURE: Apply Red (Only on the very last frame)
+                        frame = draw_status_overlay(frame, "fail")
                     
-                    # Create Grid (e.g., 2x5 or 3x4)
-                    grid_frame = self._create_grid_image(frames_np)
-                    collected_frames.append(grid_frame)
+                    annotated_frames.append(frame)
+                
+                # Convert back to numpy array for grid creation
+                frames_np = np.stack(annotated_frames)
+                
+                # Create Grid (e.g., 2x5 or 3x4)
+                grid_frame = self._create_grid_image(frames_np)
+                collected_frames.append(grid_frame)
 
-                # Prepare for next step
-                obs = next_obs
-                step_count += 1
-                pbar.update(1)
+            # Prepare for next step
+            obs = next_obs
+            step_count += 1
+            pbar.update(1)
 
         pbar.close()
 
@@ -562,60 +598,62 @@ class SimulatorRecorder:
         step_count = 0
         pbar = tqdm(total=max_steps, desc=f"Eval Rollout (seed={seed})")
 
-        with torch.inference_mode():
-            while step_count < max_steps:
-                # --- Inference ---
+        while step_count < max_steps:
+            # --- Inference ---
+            with torch.no_grad():
                 self.get_action_from_policy(obs)
 
-                if step_count >= max_steps:
-                    break
+            if step_count >= max_steps:
+                break
 
-                action = self.actions_to_rollout.popleft()
-                next_obs, reward, terminated, truncated, info = self.env.step(action)
+            action = self.actions_to_rollout.popleft()
+            next_obs, reward, terminated, truncated, info = self.env.step(action)
 
-                if isinstance(next_obs, tuple):
-                    next_obs = next_obs[0]
+            if isinstance(next_obs, tuple):
+                next_obs = next_obs[0]
 
-                # --- Success tracking ---
-                current_success = (reward > 0.5).flatten().to(self.env.device)
-                new_success = current_success & (~success_flags)
-                success_flags = success_flags | new_success
-                steps_to_success[new_success] = step_count
+            # --- Success tracking ---
+            current_success = (reward > 0.5).flatten().to(self.env.device)
+            new_success = current_success & (~success_flags)
+            success_flags = success_flags | new_success
+            steps_to_success[new_success] = step_count
 
-                # --- Video recording ---
-                if step_count % record_interval == 0:
-                    current_imgs = next_obs["third_view"][record_indices]
+            # --- Video recording ---
+            if step_count % record_interval == 0:
+                current_imgs = next_obs["third_view"][record_indices]
 
-                    if last_seen_frames is None:
-                        last_seen_frames = current_imgs.clone()
+                if last_seen_frames is None:
+                    last_seen_frames = current_imgs.clone()
 
-                    active_mask = ~success_flags[record_indices]
-                    if active_mask.any():
-                        last_seen_frames[active_mask] = current_imgs[active_mask]
+                active_mask = ~success_flags[record_indices]
+                new_success_mask = new_success[record_indices]
+                update_mask = active_mask | new_success_mask
+                if update_mask.any():
+                    last_seen_frames[update_mask] = current_imgs[update_mask]
 
-                    frames_np = last_seen_frames.cpu().numpy()
-                    annotated_frames = []
+                frames_np = last_seen_frames.cpu().numpy()
+                annotated_frames = []
 
-                    is_last_step = (step_count >= max_steps - 1)
+                is_last_step = (step_count >= max_steps - 1)
 
-                    for i, global_env_idx in enumerate(record_indices):
-                        frame = frames_np[i]
-                        is_success = success_flags[global_env_idx].item()
+                for i, global_env_idx in enumerate(record_indices):
+                    frame = frames_np[i]
+                    is_success = success_flags[global_env_idx].item()
 
-                        if is_success:
-                            frame = draw_status_overlay(frame, "success")
-                        elif is_last_step and not is_success:
-                            frame = draw_status_overlay(frame, "fail")
+                    if is_success:
+                        frame = draw_status_overlay(frame, "success")
+                    elif is_last_step and not is_success:
+                        frame = draw_status_overlay(frame, "fail")
 
-                        annotated_frames.append(frame)
+                    annotated_frames.append(frame)
 
-                    frames_np = np.stack(annotated_frames)
-                    grid_frame = self._create_grid_image(frames_np)
-                    collected_frames.append(grid_frame)
+                frames_np = np.stack(annotated_frames)
+                grid_frame = self._create_grid_image(frames_np)
+                collected_frames.append(grid_frame)
 
-                obs = next_obs
-                step_count += 1
-                pbar.update(1)
+            obs = next_obs
+            step_count += 1
+            pbar.update(1)
 
         pbar.close()
 
@@ -776,7 +814,7 @@ class SimulatorRecorder:
 
         return out
     
-@hydra.main(config_path=f"{DIR_PATH}/configs", config_name="coin_flipping", version_base="1.1")
+@hydra.main(config_path=f"{DIR_PATH}/configs", config_name="fingereye_lab", version_base="1.1")
 def main(config):
     cprint(OmegaConf.to_yaml(config), "grey")
     """Zero actions agent with Isaac Lab environment."""
@@ -790,10 +828,10 @@ def main(config):
     if args_cli.no_rand_light:
         env_cfg.randomization.random_lighting = False
     if args_cli.no_rand_coin:
-        env_cfg.randomization.random_coin_color = False
+        env_cfg.randomization.random_object_color = False
     if args_cli.no_rand_camera:
         env_cfg.randomization.random_camera_noise = False
-    if args_cli.seed:
+    if args_cli.seed is not None:
         env_cfg.seed = args_cli.seed
 
     

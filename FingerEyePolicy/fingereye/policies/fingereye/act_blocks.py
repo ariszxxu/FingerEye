@@ -246,6 +246,172 @@ class ACTDecoderLayer(nn.Module):
 
         return x, attn_weights
 
+
+class StructuredACTDecoder(nn.Module):
+    """ACT decoder with parallel group-wise cross-attention over FE, wrist, and joint tokens."""
+
+    def __init__(
+        self,
+        n_decoder_layers: int,
+        dim_model: int,
+        n_heads: int,
+        dim_feedforward: int,
+        feedforward_activation: str,
+        dropout: float,
+        pre_norm: bool,
+    ):
+        super().__init__()
+        self.layers = nn.ModuleList(
+            [
+                StructuredACTDecoderLayer(
+                    dim_model=dim_model,
+                    n_heads=n_heads,
+                    dim_feedforward=dim_feedforward,
+                    feedforward_activation=feedforward_activation,
+                    dropout=dropout,
+                    pre_norm=pre_norm,
+                )
+                for _ in range(n_decoder_layers)
+            ]
+        )
+        self.norm = nn.LayerNorm(dim_model)
+
+    def forward(self, x, encoder_out, decoder_pos_embed=None, encoder_pos_embed=None):
+        if encoder_pos_embed is not None:
+            raise ValueError("StructuredACTDecoder does not support encoder_pos_embed.")
+
+        n_tokens = encoder_out.shape[0]
+        if n_tokens == 6:
+            fe_tokens = encoder_out[:4]
+            wrist_token = encoder_out[4:5]
+            joint_token = encoder_out[5:6]
+        elif n_tokens == 4:
+            fe_tokens = encoder_out[:2]
+            wrist_token = encoder_out[2:3]
+            joint_token = encoder_out[3:4]
+        elif n_tokens == 3:
+            fe_tokens = encoder_out[:1]
+            wrist_token = encoder_out[1:2]
+            joint_token = encoder_out[2:3]
+        elif n_tokens == 2:
+            fe_tokens = encoder_out[:0]
+            wrist_token = encoder_out[0:1]
+            joint_token = encoder_out[1:2]
+        else:
+            raise ValueError(
+                "StructuredACTDecoder expects condition tokens ordered as "
+                "4 FE + 1 wrist + 1 joint, 2 FE + 1 wrist + 1 joint, "
+                "1 FE + 1 wrist + 1 joint, or 1 wrist + 1 joint; "
+                f"got {n_tokens} tokens."
+            )
+
+        attention_weights_list = []
+        for layer in self.layers:
+            x, attention_weights = layer(
+                x,
+                joint_token=joint_token,
+                wrist_token=wrist_token,
+                fe_tokens=fe_tokens,
+                decoder_pos_embed=decoder_pos_embed,
+            )
+            attention_weights_list.append(attention_weights)
+        if self.norm is not None:
+            x = self.norm(x)
+        return x, attention_weights_list
+
+
+class StructuredACTDecoderLayer(nn.Module):
+    def __init__(
+        self,
+        dim_model: int,
+        n_heads: int,
+        dim_feedforward: int,
+        feedforward_activation: str,
+        dropout: float,
+        pre_norm: bool,
+    ):
+        super().__init__()
+        self.pre_norm = pre_norm
+        self.self_attn = nn.MultiheadAttention(dim_model, n_heads, dropout=dropout)
+        self.cross_attn_joint = nn.MultiheadAttention(dim_model, n_heads, dropout=dropout)
+        self.cross_attn_wrist = nn.MultiheadAttention(dim_model, n_heads, dropout=dropout)
+        self.cross_attn_fe = nn.MultiheadAttention(dim_model, n_heads, dropout=dropout)
+
+        self.linear1 = nn.Linear(dim_model, dim_feedforward)
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(dim_feedforward, dim_model)
+        self.activation = get_activation_fn(feedforward_activation)
+
+        self.norm_self = nn.LayerNorm(dim_model)
+        self.norm_joint = nn.LayerNorm(dim_model)
+        self.norm_wrist = nn.LayerNorm(dim_model)
+        self.norm_fe = nn.LayerNorm(dim_model)
+        self.norm_cross = nn.LayerNorm(dim_model)
+        self.norm_ffn = nn.LayerNorm(dim_model)
+        self.dropout_self = nn.Dropout(dropout)
+        self.dropout_cross = nn.Dropout(dropout)
+        self.dropout_ffn = nn.Dropout(dropout)
+
+    def maybe_add_pos_embed(self, tensor, pos_embed):
+        return tensor if pos_embed is None else tensor + pos_embed
+
+    def _self_attention(self, x, decoder_pos_embed):
+        skip = x
+        if self.pre_norm:
+            x = self.norm_self(x)
+        q = k = self.maybe_add_pos_embed(x, decoder_pos_embed)
+        x = self.self_attn(q, k, value=x)[0]
+        x = skip + self.dropout_self(x)
+        if not self.pre_norm:
+            x = self.norm_self(x)
+        return x
+
+    def _cross_delta(self, x, memory, norm, attn, decoder_pos_embed):
+        if memory.shape[0] == 0:
+            return None, None
+        q_input = norm(x) if self.pre_norm else x
+        q = self.maybe_add_pos_embed(q_input, decoder_pos_embed)
+        attn_out, attn_weights = attn(q, memory, value=memory)
+        return attn_out, attn_weights
+
+    def _ffn(self, x):
+        skip = x
+        if self.pre_norm:
+            x = self.norm_ffn(x)
+        x = self.linear2(self.dropout(self.activation(self.linear1(x))))
+        x = skip + self.dropout_ffn(x)
+        if not self.pre_norm:
+            x = self.norm_ffn(x)
+        return x
+
+    def forward(self, x, joint_token, wrist_token, fe_tokens, decoder_pos_embed=None):
+        x = self._self_attention(x, decoder_pos_embed)
+        attention_weights = {}
+        deltas = []
+
+        delta_joint, attention_weights["joint"] = self._cross_delta(
+            x, joint_token, self.norm_joint, self.cross_attn_joint, decoder_pos_embed
+        )
+        deltas.append(delta_joint)
+
+        delta_wrist, attention_weights["wrist"] = self._cross_delta(
+            x, wrist_token, self.norm_wrist, self.cross_attn_wrist, decoder_pos_embed
+        )
+        deltas.append(delta_wrist)
+
+        delta_fe, attention_weights["fe"] = self._cross_delta(
+            x, fe_tokens, self.norm_fe, self.cross_attn_fe, decoder_pos_embed
+        )
+        if delta_fe is not None:
+            deltas.append(delta_fe)
+
+        x = x + self.dropout_cross(torch.stack(deltas, dim=0).mean(dim=0))
+        if not self.pre_norm:
+            x = self.norm_cross(x)
+        x = self._ffn(x)
+        return x, attention_weights
+
+
 class ACTSinusoidalPositionEmbedding2d(nn.Module):
     """2D sinusoidal positional embeddings similar to what's presented in Attention Is All You Need.
 

@@ -1,0 +1,41 @@
+# Generated experiment outputs
+outputs/
+**/outputs/
+**/output/
+**/runs/
+**/logs/
+**/recordings/
+**/videos/
+**/wandb/
+**/.neptune/
+
+# Generated datasets and zarr stores
+FingerEyePolicy/data/
+FingerEyeLab/data/
+FingerEyeRW/data/
+/data/
+/datasets/
+/logs_zarr/
+*.zarr/
+**/*.zarr/
+
+# Checkpoints and temporary training artifacts
+checkpoints/
+**/checkpoints/
+*.ckpt
+*.pt
+*.pth
+*.tmp
+*.temp
+
+# Python build/cache artifacts
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local editor settings
+.vscode/
